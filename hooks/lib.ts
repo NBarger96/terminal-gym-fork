@@ -901,7 +901,7 @@ export const paceAt = (
 export const breatherMs = (goal: number, setSize: number, windowMs: number) =>
   goal <= 0 || setSize <= 0 ? 0 : setGap(goal, setSize, windowMs) / 2
 
-// Fewer reps than the band's smallest button (`smallest`; a multi day passes its exercise's own)
+// Fewer reps than the band's smallest button (`smallest`; a multi day passes its exercise's own, or its suggested set)
 // earn their share of the breather: 2 of a 5-rep button, two fifths. A full button or more earns it all.
 export const earnedBreatherMs = (added: number, goal: number, setSize: number, windowMs: number, smallest = repSteps(setSize)[0] ?? setSize) => {
   if (added <= 0) return 0
@@ -933,13 +933,15 @@ export const paceScale = (day: { isMulti: boolean; exercises: readonly Tally[] }
   return { goal, count: day.exercises[0]?.count ?? 0, setSize: setSizeFor(goal, setSetting) }
 }
 
-// A due share is no exercise a person can do, so it is offered as real sets, the one
-// logged last first: each the share a set is of the day, of that exercise's goal, never past it.
+// A due share is no exercise a person can do, so it is offered as real sets, the one logged last
+// first: each the amount of that one exercise that covers a set's share of the whole day. An
+// exercise is 1/n of an n-exercise day, so that is n tenths of its goal, capped at what is left.
 export const setIdeas = <E extends Tally & { exercise: string }>(exercises: readonly E[], last: string | undefined) => {
   const open = exercises.filter(e => e.goal > 0 && e.count < e.goal)
   const lead = open.find(e => last !== undefined && sameExercise(e.exercise, last)) ?? open[0]
   const ordered = lead === undefined ? [] : [lead, ...open.filter(e => e !== lead)]
-  return ordered.map(e => ({ ...e, amount: Math.min(Math.ceil((e.goal * MULTI_PACE.setSize) / MULTI_PACE.goal), e.goal - e.count) }))
+  const ofDay = (goal: number) => Math.ceil((goal * exercises.length * MULTI_PACE.setSize) / MULTI_PACE.goal)
+  return ordered.map(e => ({ ...e, amount: Math.min(ofDay(e.goal), e.goal - e.count) }))
 }
 
 // Time left, rounded up to the minute: "23m", "1h", "1h 5m".
@@ -1031,7 +1033,7 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - \`/fit swap arms day\` makes today the day named Arms day, keeping counts for exercises on both; a day's name wins over an exercise's
 - \`/fit goal 60 dips\` changes dips' goal for today only; a bare \`/fit goal 60\` asks which exercise
 - in strict mode a multi day is paced as a whole: each exercise's share of its goal, capped at 100%, averaged, in 10 sets of 10%; extra dips never cover a skipped plank
-- a due set suggests a tenth of an exercise's goal, the one you logged last first: "10% of arms, e.g. 10 dips or 18s plank"; breathers, \`/fit snooze\` and \`/fit window\` work in those percent
+- a due set suggests a tenth of the day done as one exercise, the one you logged last first: with 100 dips and 180s plank, "10% of arms, e.g. 20 dips or 36s plank"; that set earns a whole breather, and breathers, \`/fit snooze\` and \`/fit window\` work in those percent
 - with progressive goals on, each exercise's goal moves on its own sessions
 
 ### Your data

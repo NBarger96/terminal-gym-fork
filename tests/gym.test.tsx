@@ -2288,16 +2288,22 @@ describe('multi days', () => {
       expect(paceScale({ isMulti: false, exercises: [{ count: 40, goal: 100 }] }, 0)).toEqual({ goal: 100, count: 40, setSize: 10 })
       expect(paceScale({ isMulti: false, exercises: [{ count: 40, goal: 100 }] }, 15)?.setSize).toBe(15)
       const ideas = (dips: number, plank: number, last?: string) => setIdeas(pair(dips, plank), last).map(e => `${e.amount} ${e.exercise}`)
-      expect(ideas(0, 0)).toEqual(['10 dips', '18 plank'])
-      expect(ideas(0, 0, 'plank')).toEqual(['18 plank', '10 dips'])
+      // Each idea alone covers a tenth of the day: on two exercises, two tenths of its goal.
+      expect(ideas(0, 0)).toEqual(['20 dips', '36 plank'])
+      expect(ideas(0, 0, 'plank')).toEqual(['36 plank', '20 dips'])
+      expect(dayShare(pair(20, 0))).toBe(10)
+      expect(dayShare(pair(0, 36))).toBe(10)
       // A finished exercise is never suggested, and a set is never more than what is left.
       expect(ideas(100, 170, 'dips')).toEqual(['10 plank'])
+      // Three exercises: three tenths of each.
+      const trio = setIdeas([{ exercise: 'dips', count: 0, goal: 100 }, { exercise: 'pushups', count: 0, goal: 50 }, { exercise: 'plank', count: 0, goal: 180 }], undefined)
+      expect(trio.map(e => e.amount)).toEqual([30, 15, 54])
     })
 
     test('a prompt is held while the share is behind and goes through once it catches up', { options: { strict: true } }, async ($, on) => {
       const { clock, toasts } = pairWorld(on)
       await start($)
-      expect((await send($)).drop).toBe('Start the day with a set: 10% of arms, e.g. 10 dips or 18s plank. /fit 10 dips to log it, then send your prompt. /fit rest skips the day (breaks streak).')
+      expect((await send($)).drop).toBe('Start the day with a set: 10% of arms, e.g. 20 dips or 36s plank. /fit 20 dips to log it, then send your prompt. /fit rest skips the day (breaks streak).')
       const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
       expect(await ui.find({ type: 'Text', text: /🏋 arms  🏁 first set: 10% to start the day/ })).toBeDefined()
       await ui.unmount()
@@ -2305,8 +2311,8 @@ describe('multi days', () => {
       expect((await send($)).drop).toBeUndefined()
       expect((await fit($, '')).text).toContain('next set in 54m')
       await clock.advance(GAP + 1_000)
-      expect(toasts).toContain('⏱ Set due: 10% of arms, e.g. 10 dips or 18s plank. 20/100% by now.')
-      expect((await send($)).drop).toBe('Set due: 10% of arms, e.g. 10 dips or 18s plank (20/100% by now). /fit 10 dips to log it, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.')
+      expect(toasts).toContain('⏱ Set due: 10% of arms, e.g. 20 dips or 36s plank. 20/100% by now.')
+      expect((await send($)).drop).toBe('Set due: 10% of arms, e.g. 20 dips or 36s plank (20/100% by now). /fit 20 dips to log it, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.')
       // Enough dips to cover the share due: caught up, with no breather needed.
       await fit($, '20')
       expect((await fit($, '')).text).not.toContain('due')
@@ -2318,13 +2324,13 @@ describe('multi days', () => {
       await start($)
       const held = (await send($)).drop
       // A bare /fit would log to dips, so the hold names the plank.
-      expect(held).toContain('Set due: 50% of arms, e.g. 18s plank (100/100% by now). /fit 18 plank to log it')
+      expect(held).toContain('Set due: 50% of arms, e.g. 36s plank (100/100% by now). /fit 36 plank to log it')
       await fit($, '50')
       expect((await fit($, '')).text).not.toContain('rest for')
       expect((await send($)).drop).toContain('Set due: 50% of arms')
       expect(toasts.some(t => t.includes('150/100'))).toBe(true)
       // The command the hold names logs the plank, and earns a breather.
-      expect((await fit($, '18 plank')).text).toContain('18/180s plank')
+      expect((await fit($, '36 plank')).text).toContain('36/180s plank')
       expect((await send($)).drop).toBeUndefined()
     })
 
@@ -2338,24 +2344,34 @@ describe('multi days', () => {
       // A full button or more: the whole breather, from now.
       expect((await fit($, '10')).text).toContain('13% due · rest for 27m')
       await clock.advance(GAP / 2 + 1_000)
-      expect(toasts).toContain('⏱ Set due: 13% of arms, e.g. 10 dips or 18s plank. 20/100% by now.')
+      expect(toasts).toContain('⏱ Set due: 13% of arms, e.g. 20 dips or 36s plank. 20/100% by now.')
       expect((await send($)).drop).toContain('Set due: 13% of arms')
     })
 
     test('the suggested set of one exercise earns the whole breather on a longer day too', { options: { strict: true } }, async ($, on) => {
       multiWorld(on, armsMonday([startedAt(MONDAY_9AM - GAP)]))
       await start($)
-      expect((await send($)).drop).toContain('Set due: 20% of Arms day, e.g. 10 dips or 5 pushups or 18s plank')
-      expect((await fit($, '10')).text).toContain('17% due · rest for 27m')
+      expect((await send($)).drop).toContain('Set due: 20% of Arms day, e.g. 30 dips or 15 pushups or 54s plank')
+      // The suggested 30 dips: a tenth of the three-exercise day, and the whole breather.
+      expect((await fit($, '30')).text).toContain('10% due · rest for 27m')
+    })
+
+    test('a suggested set smaller than its row\'s smallest button still earns the whole breather', { options: { strict: true } }, async ($, on) => {
+      const SHORT = { name: 'short', exercises: [{ exercise: 'squats', goal: 10 }, { exercise: 'dips', goal: 100 }] }
+      multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: SHORT })], startedAt(MONDAY_9AM - GAP)]))
+      await start($)
+      // Two tenths of 10 squats is 2, under the squats row's smallest button of 3.
+      expect((await send($)).drop).toContain('Set due: 20% of short, e.g. 2 squats or 20 dips')
+      expect((await fit($, '2 squats')).text).toContain('10% due · rest for 27m')
     })
 
     test('an opener put off comes back as a toast naming the day by its exercises', { options: { strict: true } }, async ($, on) => {
       const { clock, toasts } = multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: { exercises: PAIR.exercises } })]]))
       await start($)
-      expect((await send($)).drop).toContain('Start the day with a set: 10% of dips · plank, e.g. 10 dips or 18s plank.')
+      expect((await send($)).drop).toContain('Start the day with a set: 10% of dips · plank, e.g. 20 dips or 36s plank.')
       expect((await fit($, 'snooze')).text).toContain('10% of dips · plank put off until 09:30.')
       await clock.advance(30 * 60_000 + 1_000)
-      expect(toasts).toContain('🏁 First set to start the day: 10% of dips · plank, e.g. 10 dips or 18s plank.')
+      expect(toasts).toContain('🏁 First set to start the day: 10% of dips · plank, e.g. 20 dips or 36s plank.')
     })
 
     test('easy mode paces a multi day too: nothing held, a nudge only when behind, sized by the exercise', async ($, on) => {
@@ -2387,7 +2403,7 @@ describe('multi days', () => {
       await start($)
       expect((await fit($, 'window 3')).text).toContain('75% of arms left, spread over the next 3h (done by 12:00).\n🏋 arms  10% due now')
       expect(dayState(files).window).toEqual({ from: MONDAY_9AM, ms: 3 * HOUR, base: 25 })
-      expect((await send($)).drop).toContain('Set due: 10% of arms, e.g. 10 dips or 18s plank (35/100% by now)')
+      expect((await send($)).drop).toContain('Set due: 10% of arms, e.g. 20 dips or 36s plank (35/100% by now)')
       expect((await fit($, 'window 1240')).text).toContain('75% of arms left, spread between now and 12:40.')
       expect((await fit($, 'window off')).text).toContain('Back to 8h from your first prompt.\n🏋 arms')
       expect(dayState(files).window).toBeUndefined()

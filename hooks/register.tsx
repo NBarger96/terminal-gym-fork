@@ -658,6 +658,14 @@ const thenToday = (t: Today, paceLine = '') => `${t.isMulti ? '\n' : ' '}${today
 // one setting can't fit reps and seconds alike.
 const setSizeOf = (t: Today, e: TodayExercise) => setSizeFor(e.goal, t.isMulti ? 0 : paceConfig.setSize)
 
+// What earns a whole breather on a multi day: the exercise row's smallest + button, or the set
+// suggested for it when that is smaller, so the suggested set always earns the whole breather.
+const multiSmallest = (t: Today, e: TodayExercise) => {
+  const button = repSteps(setSizeOf(t, e))[0] ?? setSizeOf(t, e)
+  const suggested = setIdeas(t.exercises, t.last).find(idea => sameExercise(idea.exercise, e.exercise))?.amount
+  return Math.min(button, suggested ?? button)
+}
+
 const DAMAGED_LOG = "Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0."
 
 // Writes one exercise's new count, `last`, and what follows: breathers, toasts.
@@ -698,14 +706,15 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   // one. Clearing the debt or lowering the count ends one, so later sets aren't hidden.
   const added = count - was.count
   // The debt is on the schedule's scale. A multi day's set is measured against its own row's
-  // buttons, since its suggestion is a set of one exercise; reps past that goal add nothing.
+  // buttons or its suggested set (multiSmallest), since that is a set of one exercise; reps
+  // past that goal add nothing.
   const gained = scaleOf(after).count - scaleOf(before).count
   const capped = (n: number) => (after.isMulti && was.goal > 0 ? Math.min(n, was.goal) : n)
   const setReps = capped(count) - capped(was.count)
   const stillOwed = owed === null ? 0 : owed.behind - gained
   const s = await schedule($, after.date)
   if (owed !== null && s !== undefined && stillOwed > 0 && setReps > 0) {
-    const smallest = repSteps(after.isMulti ? setSizeOf(after, was) : owed.setSize)[0] ?? owed.setSize
+    const smallest = after.isMulti ? multiSmallest(before, was) : (repSteps(owed.setSize)[0] ?? owed.setSize)
     const until = (await $.clock.now()) + earnedBreatherMs(setReps, scaleOf(after).goal - s.base, owed.setSize, s.ms, smallest)
     const isFullSet = setReps >= smallest
     // Reps never cut short a longer breather or put-off already running. A
