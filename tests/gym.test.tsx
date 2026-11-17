@@ -1039,7 +1039,7 @@ describe('pace', () => {
     expect((await send($)).drop).toContain('20 pushups due now')
     // The first write moves the day to its file, yesterday's window left behind.
     await fit($, '10')
-    expect(JSON.parse(files.get(`${LOG}/2026-10-05.day`) ?? '{}')).toEqual({ start: MONDAY_9AM - GAP, breather: MONDAY_9AM + GAP / 2 })
+    expect(JSON.parse(files.get(`${LOG}/2026-10-05.day`) ?? '{}')).toEqual({ start: MONDAY_9AM - GAP, last: 'pushups', breather: MONDAY_9AM + GAP / 2 })
   })
 
   test('strict: the next set comes due on schedule, with a toast', { options: { strict: true } }, async ($, on) => {
