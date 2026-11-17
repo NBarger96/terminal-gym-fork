@@ -66,6 +66,8 @@ Only days with reps count as sessions. A rest day or a day with no reps doesn't 
 
 With the default rotation, 100 pushups on Monday moves Thursday and Sunday to 105 as well. An exercise with two different goals in one routine (for example, 100 pushups on Monday and 50 on Thursday) doesn't progress. When you hit a goal, the toast tells you the next one: *"Next pushups day: 105."* On the day it moves, a toast says so.
 
+On a [multi day](#multi-exercise-days), each exercise moves on its own: its last sessions are the days it had reps, single or multi, so a hit on dips moves dips while pushups and plank keep their goals. Only that exercise's entry in the day's list changes; the day's name and its other entries stay.
+
 The new goal is written to `routine.json`. Before that, the days before today are frozen at the goals they had, so the grid still shows them as hit. `/fit progress off` stops the changes and keeps the goals where they are.
 
 ## Multi-exercise days
@@ -89,7 +91,7 @@ The day counts once for your streak when any exercise has reps, and as hit on th
 
 An entry with no name, a goal of 0 or less, a name already listed (in any case), or past the fifth is left out, and one toast names every entry left out. A day whose list ends up empty has no plan.
 
-Not on a multi day yet: strict mode holds no prompt and runs no set schedule, progressive goals leave it alone, and `/fit swap`, `/fit goal`, `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
+Not on a multi day yet: strict mode holds no prompt and runs no set schedule, and `/fit swap`, `/fit goal`, `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
 
 ## The scoreboard
 
@@ -152,7 +154,7 @@ In `/config`, under terminal-gym:
 
 The mod makes no network calls and adds no hidden context for the model. `/fit` replies appear in your conversation like any slash command's output, so Claude can see them. Everything else stays on your machine: a few values in the mod's own store (see below), and your data in `~/.claude/fitness`:
 
-- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises, or a multi day, `{ "name": "Arms day", "exercises": [ … ] }` (see [Multi-exercise days](#multi-exercise-days)). Edit it for a custom program. With progressive goals on, the mod changes the goals in it, writing a single day back as one plan and a multi day as its name and list.
+- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises, or a multi day, `{ "name": "Arms day", "exercises": [ … ] }` (see [Multi-exercise days](#multi-exercise-days)). Edit it for a custom program. With progressive goals on, the mod changes the goals in it and nothing else: a single day stays one plan, a multi day keeps its name and list, and other keys stay as written.
 - `log/YYYY-MM-DD`: that day's count; on a multi day, a count per exercise, for example `{"dips":40,"pushups":20,"plank":0}`.
 - `log/YYYY-MM-DD.skip`: a rest day. If it contains `off`, the rest day was undone.
 - `log/YYYY-MM-DD.swap`: that day's plan after `/fit swap` or `/fit goal`, in the same shape as a routine day.
