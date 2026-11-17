@@ -163,6 +163,24 @@ export const goalsOverFile = (raw: Record<string, unknown>, routine: Routine): R
 export const logTarget = (exercises: readonly { exercise: string }[], last: string | undefined) =>
   Math.max(0, exercises.findIndex(entry => entry.exercise === last))
 
+export type ExerciseMatch = { kind: 'one'; index: number } | { kind: 'many'; names: string[] } | { kind: 'none' }
+
+// A name as matching compares it: one space between words, lowercase.
+const normalName = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase()
+
+// Which of `names` a typed name means: a whole name in any case, else the only one it starts.
+export const matchExercise = (typed: string, names: readonly string[]): ExerciseMatch => {
+  const wanted = normalName(typed)
+  if (wanted === '') return { kind: 'none' }
+  const normalNames = names.map(normalName)
+  const whole = normalNames.indexOf(wanted)
+  if (whole >= 0) return { kind: 'one', index: whole }
+  const starts = normalNames.flatMap((name, i) => (name.startsWith(wanted) ? [i] : []))
+  const [only, ...more] = starts
+  if (only === undefined) return { kind: 'none' }
+  return more.length === 0 ? { kind: 'one', index: only } : { kind: 'many', names: starts.map(i => names[i] ?? '') }
+}
+
 export const DEFAULT_ROUTINE: Routine = {
   mon: single({ exercise: 'pushups', goal: 100 }),
   tue: single({ exercise: 'dips', goal: 100 }),
@@ -217,8 +235,9 @@ export type FitCommand =
   | { kind: 'swap'; exercise?: string }
   | { kind: 'strict'; isOn: boolean }
   | { kind: 'progress'; isOn: boolean }
-  | { kind: 'add'; n: number }
-  | { kind: 'set'; n: number }
+  // `typedName`: what was typed after the number, all or the start of a name; absent, a bare /fit's target.
+  | { kind: 'add'; n: number; typedName?: string }
+  | { kind: 'set'; n: number; typedName?: string }
   | { kind: 'goal'; n: number }
   // null: back to the configured window from the first prompt.
   | { kind: 'window'; hours: number | null }
@@ -229,7 +248,13 @@ export type FitCommand =
 // How long a set can be put off, and how often.
 export const SNOOZE = { defaultMinutes: 30, maxMinutes: 60, perDay: 2 } as const
 
-const USAGE = 'usage: /fit [<n> | set <n> | reset | goal <n> | window <hours>|<hhmm>|off | snooze [minutes] | swap [exercise] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]'
+const USAGE = 'usage: /fit [<n> [exercise] | set <n> [exercise] | reset | goal <n> | window <hours>|<hhmm>|off | snooze [minutes] | swap [exercise] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]'
+
+// The name typed after `/fit 20` or `/fit set 80`: names may be several words ("jumping jacks").
+const namedAfter = (args: string, words: number) => {
+  const name = normalName(args.trim().split(/\s+/).slice(words).join(' '))
+  return name === '' ? {} : { typedName: name }
+}
 
 export const parseFit = (args: string): FitCommand => {
   const [head = '', value] = args.trim().split(/\s+/)
@@ -258,7 +283,7 @@ export const parseFit = (args: string): FitCommand => {
   if (head === 'progress') return { kind: 'progress', isOn: value !== 'off' }
   if (head === 'set') {
     return value !== undefined && /^\d+$/.test(value)
-      ? { kind: 'set', n: Number(value) }
+      ? { kind: 'set', n: Number(value), ...namedAfter(args, 2) }
       : { kind: 'error', text: 'fit: set needs a number' }
   }
   if (head === 'goal') {
@@ -290,7 +315,7 @@ export const parseFit = (args: string): FitCommand => {
       ? { kind: 'snooze', minutes }
       : { kind: 'error', text: `fit: snooze takes minutes from now, up to ${SNOOZE.maxMinutes}, like /fit snooze 30` }
   }
-  if (/^-?\d+$/.test(head)) return { kind: 'add', n: Number(head) }
+  if (/^-?\d+$/.test(head)) return { kind: 'add', n: Number(head), ...namedAfter(args, 1) }
   return { kind: 'error', text: USAGE }
 }
 
@@ -715,7 +740,7 @@ or press a **+** button above the prompt (sized to your set)
 | Command | Does |
 |---|---|
 | \`/fit\` | today's progress |
-| \`/fit set 80\` | fix today's count |
+| \`/fit set 80 [exercise]\` | fix today's count (the exercise named, or the one logged last) |
 | \`/fit reset\` | today back to 0 |
 | \`/fit goal 60\` | change today's goal |
 | \`/fit window 3\` | finish today in the next 3h |
@@ -754,6 +779,9 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - or type them in \`/fit program\` under **Custom days**, a line per weekday: \`arms: 100 dips, 100 pushups, 180s plank\` (a name, then goals, \`s\` for seconds); \`30 burpees\` is a one-exercise day, and an empty line no plan
 - the band shows the day's name, pace and streak, then a row per exercise with its own bar and **+** buttons (seconds for a timed one)
 - a **+** logs to its row; \`/fit 20\` logs to the exercise you logged last, or the first
+- \`/fit 20 dips\` logs to dips: any case, or the start of a name (\`/fit 20 di\`) when only one exercise starts that way
+- \`/fit set 80 dips\` fixes one exercise; \`/fit set 80\` fixes the one you logged last; \`/fit reset\` puts every exercise back to 0
+- a toast lists what is left when an exercise finishes, and every count when the day does
 - a finished exercise shows ✅; the day counts once for the streak, and as hit when every exercise is
 - entries with no name, a goal of 0 or less, a repeated name or past the fifth are left out, and a toast names them
 - not yet on a multi day: \`/fit swap\`, \`/fit goal\`, \`/fit window\`, \`/fit snooze\`, strict holds and progressive goals
