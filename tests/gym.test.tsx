@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, droppedText, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, swappedLog, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, droppedText, exerciseGoals, formatDayLog, heatCells, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, swappedLog, untilText } from '../hooks/lib'
 
 // A routine as routine.json would hold it, read into the shape the helpers take.
 const asRoutine = (raw: object) => parseRoutine(raw).routine
@@ -618,11 +618,11 @@ describe('swap', () => {
       tue: { exercise: 'dips', goal: 100 },
       wed: { exercise: 'squats', goal: 300 },
     })
-    const on = (exercise: string) => ({ plans: [{ exercise, goal: 100 }] })
-    expect(pickSwap(routine, on('pushups'))).toEqual({ kind: 'day', day: { plans: [{ exercise: 'dips', goal: 100 }] } })
-    expect(pickSwap(routine, on('squats'))).toEqual({ kind: 'day', day: { plans: [{ exercise: 'pushups', goal: 100 }] } })
-    expect(pickSwap(routine, on('pushups'), 'squats')).toEqual({ kind: 'day', day: { plans: [{ exercise: 'squats', goal: 300 }] } })
-    expect(pickSwap(routine, on('pushups'), 'burpees')).toMatchObject({ kind: 'refuse' })
+    const dayOf = (exercise: string) => ({ plans: [{ exercise, goal: 100 }] })
+    expect(pickSwap(routine, dayOf('pushups'))).toEqual({ kind: 'day', day: { plans: [{ exercise: 'dips', goal: 100 }] } })
+    expect(pickSwap(routine, dayOf('squats'))).toEqual({ kind: 'day', day: { plans: [{ exercise: 'pushups', goal: 100 }] } })
+    expect(pickSwap(routine, dayOf('pushups'), 'squats')).toEqual({ kind: 'day', day: { plans: [{ exercise: 'squats', goal: 300 }] } })
+    expect(pickSwap(routine, dayOf('pushups'), 'burpees')).toMatchObject({ kind: 'refuse' })
   })
 
   test('/fit swap changes today and sticks for the day', async ($, on) => {
@@ -2275,7 +2275,7 @@ describe('multi days', () => {
     const PAIR = { name: 'arms', exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'plank', goal: 180, unit: 's' }] }
     const pairWorld = (on: On, more: [string, string][] = []) =>
       multiWorld(on, new Map<string, string>([[ROUTINE, JSON.stringify({ mon: PAIR })], ...more]))
-    const startedAt = (start: number): [string, string] => [`${TODAY_LOG}.day`, day({ start })]
+    const startedAt = (at: number): [string, string] => [`${TODAY_LOG}.day`, day({ start: at })]
 
     test('the day is paced by its capped average share, as sets of 10%', () => {
       const pair = (dips: number, plank: number) => [{ exercise: 'dips', count: dips, goal: 100 }, { exercise: 'plank', count: plank, goal: 180 }]
@@ -2435,9 +2435,13 @@ describe('multi days', () => {
       expect((await fit($, 'swap dips situps')).text).toMatch(/^Swapped dips for situps today\.\n🏋 arms  20% due now/)
     })
 
-    test('the help names the multi-day strict rule', () => {
-      expect(HELP).toContain('in strict mode a multi day is paced as a whole')
-      expect(HELP).not.toContain('`/fit window`, `/fit snooze`, strict holds')
+    test('/fit help names the multi-day strict rule', async ($, on) => {
+      pairWorld(on)
+      await start($)
+      await fit($, 'help')
+      const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-help' })
+      expect(await ui.find({ type: 'Markdown', text: /### Multi-exercise days[\s\S]*in strict mode a multi day is paced as a whole/ })).toBeDefined()
+      await ui.unmount()
     })
   })
 
@@ -2787,9 +2791,11 @@ describe('multi days', () => {
   })
 
   test('names lose their control characters before they reach a reply, the band or a toast', async ($, on) => {
-    const { toasts } = multiWorld(on, new Map([[ROUTINE, JSON.stringify({
+    const { toasts, session } = multiWorld(on, new Map([[ROUTINE, JSON.stringify({
       mon: { name: 'Arms\u001b[31m day\n', exercises: [{ exercise: 'di\u0007ps', goal: 100 }, { exercise: 'push\u009bups', goal: 50 }, { exercise: 'x\u001b', goal: 0 }] },
     })]]))
+    // Its own conversation: the left-out toast's once-per-conversation mark starts clear whatever ran before.
+    session.id = 'control-characters'
     await start($)
     const controls = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/
     const text = (await fit($, '10')).text
@@ -3302,6 +3308,8 @@ describe('custom days', () => {
     const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'mobile', ...ONBOARD })
     await ui.press({ key: 'next' })
     expect(await ui.find({ key: 'program-2' })).toBeDefined()
+    // Neither custom choice: Custom goals (program-3) nor Custom days (program-4).
+    expect(await ui.find({ key: 'program-3' })).toBeUndefined()
     expect(await ui.find({ key: 'program-4' })).toBeUndefined()
     await ui.unmount()
   })
