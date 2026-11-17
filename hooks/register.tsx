@@ -16,6 +16,8 @@ import {
   clockTime,
   untilText,
   paceAt,
+  paceScale,
+  setIdeas,
   setSizeFor,
   stepFor,
   buttonsWidth,
@@ -423,13 +425,12 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
   dueTimer = undefined
   // Re-read today: the date may have rolled over, or the shell script logged reps.
   const { t, state: day } = await readToday($)
-  // The schedule paces one exercise: a multi day has none, so strict holds nothing on it.
-  const paced = paceable(t)
+  const paced = scaleOf(t)
   const s = scheduleOf(day)
   const now = await $.clock.now()
   let next: Pace | null = null
-  if (paced !== undefined && !t.isRest && s !== undefined) {
-    const left = paceAt(Math.max(0, paced.goal - s.base), paced.count - s.base, setSizeFor(paced.goal, paceConfig.setSize), s.from, now, s.ms)
+  if (!t.isRest && s !== undefined) {
+    const left = paceAt(Math.max(0, paced.goal - s.base), paced.count - s.base, paced.setSize, s.from, now, s.ms)
     next = {
       ...left,
       // Goal met: the schedule may still hold sets, but none are due.
@@ -439,7 +440,8 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
       restUntil: day.breather !== undefined && day.breather > now ? day.breather : null,
       isPutOff: day.putOff !== undefined && day.putOff === left.required + s.base,
       // A window set mid-day (base > 0) is never the day's opener, even after a reset.
-      isOpening: s.base === 0 && paced.count === 0 && left.behind > 0 && left.required <= left.setSize,
+      isOpening: s.base === 0 && t.exercises.every(e => e.count === 0) && left.behind > 0 && left.required <= left.setSize,
+      ...(t.isMulti ? { unit: '%' as const } : {}),
     }
   }
   await update($, pace, () => next)
@@ -466,7 +468,7 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
     tick(now)
   }
   const wakeAt = Math.min(next?.nextDueAt ?? Infinity, next?.restUntil ?? Infinity)
-  if (wakeAt !== Infinity && paced !== undefined && paced.count < paced.goal) {
+  if (wakeAt !== Infinity && paced.count < paced.goal) {
     dueTimer = $.clock.after(Math.max(1, wakeAt - now), () => void setDue($))
   }
   return next
@@ -475,11 +477,12 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
 const setDue = async ($: Engine) => {
   const p = await refreshPace($)
   const t = await read($, today)
-  const paced = t === null ? undefined : paceable(t)
-  if (p === null || paced === undefined || p.behind <= 0 || p.restUntil !== null) return
-  toast($, p.isOpening === true
-    ? `🏁 First set: ${p.behind} ${paced.exercise} to start the day.`
-    : `⏱ Set due: ${p.behind} ${paced.exercise}. ${p.required}/${paced.goal} by now.`)
+  if (t === null || p === null || p.behind <= 0 || p.restUntil !== null) return
+  if (p.isOpening === true) {
+    toast($, t.isMulti ? `🏁 First set to start the day: ${setText(t, p.behind)}.` : `🏁 First set: ${setText(t, p.behind)} to start the day.`)
+    return
+  }
+  toast($, `⏱ Set due: ${setText(t, p.behind)}. ${byNow(t, p)}.`)
 }
 
 // A Close button's press: a refused close says why instead of doing nothing.
@@ -494,12 +497,13 @@ const closePane = async ($: Engine, id: string) => {
 // Owed reps read as a set that's due, not a debt; a breather as rest left.
 const paceText = (p: Pace | null, isStrict: boolean, now: number) => {
   if (p === null) return ''
-  if (p.isOpening === true) return `  🏁 first set: ${p.behind} to start the day`
+  const owed = `${p.behind}${p.unit ?? ''}`
+  if (p.isOpening === true) return `  🏁 first set: ${owed} to start the day`
   if (p.behind > 0 && p.restUntil !== null) {
-    if (p.isPutOff === true) return `  ${p.behind} due · back at ${clockTime(p.restUntil)}`
-    return `  ${p.behind} due · rest for ${untilText(p.restUntil - now)}`
+    if (p.isPutOff === true) return `  ${owed} due · back at ${clockTime(p.restUntil)}`
+    return `  ${owed} due · rest for ${untilText(p.restUntil - now)}`
   }
-  if (p.behind > 0) return `  ${p.behind} due now${isStrict ? ' · log it to keep prompting' : ''}`
+  if (p.behind > 0) return `  ${owed} due now${isStrict ? ' · log it to keep prompting' : ''}`
   return p.nextDueAt === null ? '' : `  next set in ${untilText(p.nextDueAt - now)}`
 }
 
@@ -533,8 +537,39 @@ const withStreak = (t: Today, days: readonly Day[], older = 0) => todayText(t, '
 // The exercise a bare `/fit 20` logs to, a nudge suggests and the spinner names.
 const focusOf = (t: Today) => t.exercises[logTarget(t.exercises, t.last)] ?? t.exercises[0] ?? { ...NO_PLAN, unit: '', count: 0 }
 
-// The one exercise the set schedule paces: a single day's. Undefined on a multi day.
+// A single day's one exercise, for the commands a multi day still refuses. Undefined on a multi day.
 const paceable = (t: Today) => (t.isMulti ? undefined : t.exercises[0])
+
+// Read at each use: the set-size option is set when the module registers.
+const scaleOf = (t: Today) => paceScale(t, paceConfig.setSize)
+
+// Each idea in its exercise's own unit, so a plank reads in seconds.
+const ideasText = (t: Today) => setIdeas(t.exercises, t.last).map(e => `${e.amount}${e.unit} ${e.exercise}`).join(' or ')
+
+// A due set where a short reply has room. A multi day is named as the band names it.
+const owedOf = (t: Today, owed: number) => (t.isMulti ? `${owed}% of ${dayName(t)}` : `${owed} ${paceable(t)?.exercise ?? 'reps'}`)
+
+// A share is no exercise anyone can do, so a toast or a held prompt offers real sets for it.
+const setText = (t: Today, owed: number) => (t.isMulti ? `${owedOf(t, owed)}, e.g. ${ideasText(t)}` : owedOf(t, owed))
+
+// "20/100 by now", in the pace's own unit.
+const byNow = (t: Today, p: Pace) => `${p.required}/${scaleOf(t).goal}${p.unit ?? ''} by now`
+
+// A bare /fit logs to the last exercise, so a multi day offers it only when that is the one suggested.
+const logHow = (t: Today, owed: number) => {
+  if (!t.isMulti) return `/fit ${owed} to log it`
+  const [lead] = setIdeas(t.exercises, t.last)
+  return lead !== undefined && focusOf(t).exercise === lead.exercise ? `/fit ${lead.amount} logs ${lead.exercise}` : 'A + button logs it'
+}
+
+// A single day keeps its unit, since the reply names reps or seconds left.
+const leftOfDay = (t: Today) => {
+  const { goal, count } = scaleOf(t)
+  return t.isMulti ? owedOf(t, goal - count) : `${goal - count}${paceable(t)?.unit ?? ''} ${paceable(t)?.exercise ?? 'reps'}`
+}
+
+// A multi day's rows can't follow a sentence on its line, so they start below it.
+const thenToday = (t: Today, paceLine = '') => `${t.isMulti ? '\n' : ' '}${todayText(t, paceLine)}`
 
 // A set's size for an exercise: a multi day sizes each from its own goal, since
 // one setting can't fit reps and seconds alike.
@@ -578,11 +613,17 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   // one counts, and fewer reps than the band's smallest button earn a shorter
   // one. Clearing the debt or lowering the count ends one, so later sets aren't hidden.
   const added = count - was.count
-  const stillOwed = owed === null ? 0 : owed.behind - added
+  // The debt is on the schedule's scale. A multi day's set is measured against its own row's
+  // buttons, since its suggestion is a set of one exercise; reps past that goal add nothing.
+  const gained = scaleOf(after).count - scaleOf(before).count
+  const capped = (n: number) => (after.isMulti && was.goal > 0 ? Math.min(n, was.goal) : n)
+  const setReps = capped(count) - capped(was.count)
+  const stillOwed = owed === null ? 0 : owed.behind - gained
   const s = await schedule($, after.date)
-  if (owed !== null && s !== undefined && stillOwed > 0 && added > 0) {
-    const until = (await $.clock.now()) + earnedBreatherMs(added, was.goal - s.base, owed.setSize, s.ms)
-    const isFullSet = added >= (repSteps(owed.setSize)[0] ?? owed.setSize)
+  if (owed !== null && s !== undefined && stillOwed > 0 && setReps > 0) {
+    const smallest = repSteps(after.isMulti ? setSizeOf(after, was) : owed.setSize)[0] ?? owed.setSize
+    const until = (await $.clock.now()) + earnedBreatherMs(setReps, scaleOf(after).goal - s.base, owed.setSize, s.ms, smallest)
+    const isFullSet = setReps >= smallest
     // Reps never cut short a longer breather or put-off already running. A
     // full set means it's no longer the set that was put off; a few reps under
     // a put-off that ends later leave its hold and its mark alone.
@@ -592,7 +633,7 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
       const { putOff: _, ...rest } = state
       return { ...rest, breather: isLater ? state.breather : until }
     })
-  } else if (stillOwed <= 0 || added < 0) {
+  } else if (stillOwed <= 0 || setReps < 0) {
     await endBreather($, after.date)
   }
   await refreshPace($)
@@ -672,7 +713,8 @@ const nudge = async ($: Engine) => {
   const e = [focusOf(t), ...t.exercises].find(entry => !isFinished(entry))
   if (e === undefined) return
   if (p !== null && (p.behind <= 0 || p.restUntil !== null)) return
-  nudged = { reps: p === null ? setSizeOf(t, e) : Math.min(p.behind, p.setSize), exercise: e.exercise }
+  // A multi day's pace is in percent, so its nudge is the exercise's own set.
+  nudged = { reps: p === null || t.isMulti ? setSizeOf(t, e) : Math.min(p.behind, p.setSize), exercise: e.exercise }
   if (nudged.reps <= 0) return
   await update($, isWaiting, () => true)
   toast($, `Your agent's mid-set. You next: ${nudged.reps} ${e.exercise}.`)
@@ -936,17 +978,16 @@ export const register: Register = (on, options) => {
       }
       case 'window': {
         const t = await refreshToday($)
-        const paced = paceable(t)
-        if (paced === undefined) return { text: NOT_ON_MULTI('/fit window') }
+        const paced = scaleOf(t)
         if (cmd.hours === null) {
           await writeDayState($, t.date, ({ window: _, ...rest }) => rest)
           return {
-            text: `Back to ${paceConfig.windowMs / HOUR_MS}h from your first prompt. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+            text: `Back to ${paceConfig.windowMs / HOUR_MS}h from your first prompt.${thenToday(t, paceText(await reschedule($, t.date), isStrict, await $.clock.now()))}`,
           }
         }
         if (t.isRest) return { text: "Today's a rest day. /fit rest off to train." }
         if (paced.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
-        if (paced.count >= paced.goal) return { text: `Today's goal is done. ${line(paced)}` }
+        if (paced.count >= paced.goal) return { text: `Today's goal is done.${thenToday(t)}` }
         const now = await $.clock.now()
         // Today ends at midnight: a window can't run into tomorrow's log. It ends a
         // minute early so its last set comes due today, not on the stroke of midnight.
@@ -956,16 +997,15 @@ export const register: Register = (on, options) => {
         await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms, base: paced.count } }))
         const span = ms < cmd.hours * HOUR_MS ? 'between now and midnight' : `over the next ${cmd.hours}h (done by ${clockTime(now + ms)})`
         return {
-          text: `${paced.goal - paced.count}${paced.unit} ${paced.exercise} left, spread ${span}. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+          text: `${leftOfDay(t)} left, spread ${span}.${thenToday(t, paceText(await reschedule($, t.date), isStrict, await $.clock.now()))}`,
         }
       }
       case 'window-until': {
         const t = await refreshToday($)
-        const paced = paceable(t)
-        if (paced === undefined) return { text: NOT_ON_MULTI('/fit window') }
+        const paced = scaleOf(t)
         if (t.isRest) return { text: "Today's a rest day. /fit rest off to train." }
         if (paced.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
-        if (paced.count >= paced.goal) return { text: `Today's goal is done. ${line(paced)}` }
+        if (paced.count >= paced.goal) return { text: `Today's goal is done.${thenToday(t)}` }
         const now = await $.clock.now()
         const d = new Date(now)
         const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), cmd.hour, cmd.minute).getTime()
@@ -974,7 +1014,7 @@ export const register: Register = (on, options) => {
         // The same window `/fit window <hours>` sets, ending at the time named.
         await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms: end - now, base: paced.count } }))
         return {
-          text: `${paced.goal - paced.count}${paced.unit} ${paced.exercise} left, spread between now and ${named}. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+          text: `${leftOfDay(t)} left, spread between now and ${named}.${thenToday(t, paceText(await reschedule($, t.date), isStrict, await $.clock.now()))}`,
         }
       }
       case 'snooze': {
@@ -983,9 +1023,8 @@ export const register: Register = (on, options) => {
         const p = await refreshPace($)
         const t = await read($, today)
         if (t === null || t.isRest) return { text: "Today's a rest day. Nothing to put off." }
-        const paced = paceable(t)
-        if (paced === undefined) return { text: NOT_ON_MULTI('/fit snooze') }
-        if (isFinished(paced)) return { text: `Today's goal is done. ${line(paced)}` }
+        const paced = scaleOf(t)
+        if (paced.goal > 0 && paced.count >= paced.goal) return { text: `Today's goal is done.${thenToday(t)}` }
         if (p === null) return { text: 'Nothing is due yet. The day starts with your first prompt.' }
         if (p.behind <= 0) {
           return { text: p.nextDueAt === null ? 'Nothing is due.' : `Nothing is due until ${clockTime(p.nextDueAt)}. Put it off then.` }
@@ -995,7 +1034,8 @@ export const register: Register = (on, options) => {
         }
         const day = await readDayState($, t.date)
         if (day.putOff === p.required) {
-          return { text: `This set was already put off once. Log it, even a short one (/fit ${repSteps(p.setSize)[0] ?? p.setSize} earns a breather).` }
+          const short = t.isMulti ? `e.g. ${ideasText(t)}` : `/fit ${repSteps(p.setSize)[0] ?? p.setSize} earns a breather`
+          return { text: `This set was already put off once. Log it, even a short one (${short}).` }
         }
         if ((day.laters ?? 0) >= SNOOZE.perDay) {
           return { text: `That's ${SNOOZE.perDay} put off today already. Log a set, even a short one, or /fit easy stops holding prompts.` }
@@ -1003,7 +1043,7 @@ export const register: Register = (on, options) => {
         const until = (await $.clock.now()) + cmd.minutes * 60_000
         await writeDayState($, t.date, s => ({ ...s, breather: until, laters: (s.laters ?? 0) + 1, putOff: p.required }))
         return {
-          text: `${p.behind} ${paced.exercise} put off until ${clockTime(until)}. ${line(paced)}${paceText(await refreshPace($), isStrict, await $.clock.now())}`,
+          text: `${owedOf(t, p.behind)} put off until ${clockTime(until)}.${thenToday(t, paceText(await refreshPace($), isStrict, await $.clock.now()))}`,
         }
       }
       case 'program':
@@ -1066,17 +1106,19 @@ export const register: Register = (on, options) => {
     await startDay($)
     const p = await refreshPace($)
     const t = await read($, today)
-    const paced = t === null ? undefined : paceable(t)
     // Claude Code puts a dropped prompt back in the box itself; a fill here
-    // as well left it there twice. No pace on a multi day, so nothing is held there.
-    if (isStrict && p !== null && p.behind > 0 && p.restUntil === null) {
+    // as well left it there twice.
+    if (isStrict && t !== null && p !== null && p.behind > 0 && p.restUntil === null) {
       if (p.isOpening === true) {
         return {
-          drop: `Start the day with a set: ${p.behind} ${paced?.exercise ?? 'reps'}. /fit ${p.behind} to log it, then send your prompt. /fit rest skips the day (breaks streak).`,
+          drop: `Start the day with a set: ${setText(t, p.behind)}. ${logHow(t, p.behind)}, then send your prompt. /fit rest skips the day (breaks streak).`,
         }
       }
+      const due = t.isMulti
+        ? `Set due: ${setText(t, p.behind)} (${byNow(t, p)})`
+        : `${setText(t, p.behind)} due now (${byNow(t, p)})`
       return {
-        drop: `${p.behind} ${paced?.exercise ?? 'reps'} due now (${p.required}/${paced?.goal ?? 0} by now). /fit ${p.behind} to log it, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.`,
+        drop: `${due}. ${logHow(t, p.behind)}, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.`,
       }
     }
     return next(e)

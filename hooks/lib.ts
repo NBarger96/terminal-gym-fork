@@ -560,12 +560,45 @@ export const paceAt = (
 export const breatherMs = (goal: number, setSize: number, windowMs: number) =>
   goal <= 0 || setSize <= 0 ? 0 : setGap(goal, setSize, windowMs) / 2
 
-// Fewer reps than the band's smallest button earn their share of the breather:
-// 2 of a 5-rep button, two fifths. A full button or more earns it all.
-export const earnedBreatherMs = (added: number, goal: number, setSize: number, windowMs: number) => {
+// Fewer reps than the band's smallest button (`smallest`; a multi day passes its exercise's own)
+// earn their share of the breather: 2 of a 5-rep button, two fifths. A full button or more earns it all.
+export const earnedBreatherMs = (added: number, goal: number, setSize: number, windowMs: number, smallest = repSteps(setSize)[0] ?? setSize) => {
   if (added <= 0) return 0
-  const smallest = repSteps(setSize)[0] ?? setSize
   return breatherMs(goal, setSize, windowMs) * Math.min(1, added / Math.max(1, smallest))
+}
+
+// Percent, so reps and seconds add up on one schedule; a set is the tenth a single day's default is.
+const MULTI_PACE = { goal: 100, setSize: 10 } as const
+
+// A count against its goal: what the share and the set ideas read.
+type Tally = { count: number; goal: number }
+
+// What the set schedule paces, in the units its numbers are in.
+export type PaceScale = { goal: number; count: number; setSize: number }
+
+// Capped so extra dips never cover a skipped plank; whole percent so a due share reads
+// cleanly. The nudge keeps a float like 9.999… from flooring a full tenth to 9.
+export const dayShare = (exercises: readonly Tally[]) => {
+  if (exercises.length === 0) return 0
+  const shares = exercises.reduce((sum, e) => sum + (e.goal > 0 ? Math.min(1, Math.max(0, e.count) / e.goal) : 1), 0)
+  return Math.floor((shares / exercises.length) * MULTI_PACE.goal + 1e-9)
+}
+
+// One schedule for both kinds of day: a multi day's exercises can't share a rep count,
+// so it is paced by its share instead. A day with no exercise has nothing to pace.
+export const paceScale = (day: { isMulti: boolean; exercises: readonly Tally[] }, setSetting: number): PaceScale => {
+  if (day.isMulti) return { goal: MULTI_PACE.goal, count: dayShare(day.exercises), setSize: MULTI_PACE.setSize }
+  const goal = day.exercises[0]?.goal ?? 0
+  return { goal, count: day.exercises[0]?.count ?? 0, setSize: setSizeFor(goal, setSetting) }
+}
+
+// A due share is no exercise a person can do, so it is offered as real sets, the one
+// logged last first: each the share a set is of the day, of that exercise's goal, never past it.
+export const setIdeas = <E extends Tally & { exercise: string }>(exercises: readonly E[], last: string | undefined) => {
+  const open = exercises.filter(e => e.goal > 0 && e.count < e.goal)
+  const lead = open.find(e => e.exercise === last) ?? open[0]
+  const ordered = lead === undefined ? [] : [lead, ...open.filter(e => e !== lead)]
+  return ordered.map(e => ({ ...e, amount: Math.min(Math.ceil((e.goal * MULTI_PACE.setSize) / MULTI_PACE.goal), e.goal - e.count) }))
 }
 
 // Time left, rounded up to the minute: "23m", "1h", "1h 5m".
@@ -649,7 +682,9 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - a **+** logs to its row; \`/fit 20\` logs to the exercise you logged last, or the first
 - a finished exercise shows ✅; the day counts once for the streak, and as hit when every exercise is
 - entries with no name, a goal of 0 or less, a repeated name or past the fifth are left out, and a toast names them
-- not yet on a multi day: \`/fit swap\`, \`/fit goal\`, \`/fit window\`, \`/fit snooze\`, strict holds and progressive goals
+- in strict mode a multi day is paced as a whole: each exercise's share of its goal, capped at 100%, averaged, in 10 sets of 10%; extra dips never cover a skipped plank
+- a due set suggests a tenth of an exercise's goal, the one you logged last first: "10% of arms, e.g. 10 dips or 18s plank"; breathers, \`/fit snooze\` and \`/fit window\` work in those percent
+- not yet on a multi day: \`/fit swap\`, \`/fit goal\` and progressive goals
 
 ### Your data
 Stays on this machine, in \`~/.claude/fitness\`.`
