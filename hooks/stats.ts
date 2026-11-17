@@ -1,8 +1,9 @@
 import type { Day } from '../types'
-import { DEFAULT, EMPTY, GRID_COLORS, dayKey, encodeCells, isDone, keepsStreak, lastDays, noonOf } from './lib'
+import { DEFAULT, EMPTY, GRID_COLORS, byDate, dayKey, encodeCells, entriesByDate, isDateDone, isDone, keepsDateStreak, lastDays, noonOf, normalName, sameExercise } from './lib'
 
-// The scoreboard's numbers and charts, worked out from the ledger: every day
-// with reps, oldest first. Pure, so a drawing only has to read them.
+// The scoreboard's numbers and charts from the ledger: every day with reps, oldest first, one entry
+// per exercise (a multi day's share a date, and one may have none). Pure, so a drawing only reads them.
+// An exercise is one however it is spelled (`Dips`, `dips`), and is named by its first spelling.
 
 const DAY_MS = 86_400_000
 // Today on the year grid: the band's green, which no exercise wears.
@@ -31,13 +32,17 @@ export type ExerciseColors = ReadonlyMap<string, number>
 // By first day logged, which never changes, so an exercise keeps its colour.
 export const exerciseColors = (ledger: readonly Day[]): ExerciseColors => {
   const colors = new Map<string, number>()
+  const seen = new Set<string>()
   for (const day of ledger) {
-    if (!colors.has(day.exercise)) colors.set(day.exercise, EXERCISE_HUES[colors.size] ?? OTHER_HUE)
+    if (day.count <= 0 || seen.has(normalName(day.exercise))) continue
+    seen.add(normalName(day.exercise))
+    colors.set(day.exercise, EXERCISE_HUES[colors.size] ?? OTHER_HUE)
   }
   return colors
 }
 
-const colorOf = (colors: ExerciseColors, exercise: string) => colors.get(exercise) ?? OTHER_HUE
+const colorOf = (colors: ExerciseColors, exercise: string) =>
+  colors.get(exercise) ?? [...colors].find(([name]) => sameExercise(name, exercise))?.[1] ?? OTHER_HUE
 
 export const RANGES = [
   { days: 7, label: '7d' },
@@ -72,7 +77,9 @@ export type ExerciseTotal = {
 export const exerciseTotals = (ledger: readonly Day[]): ExerciseTotal[] => {
   const totals = new Map<string, ExerciseTotal>()
   for (const day of ledger) {
-    const row = totals.get(day.exercise) ?? { exercise: day.exercise, unit: day.unit ?? '', total: 0, days: 0, goalsHit: 0, best: 0, bestDate: '' }
+    if (day.count <= 0) continue
+    const key = normalName(day.exercise)
+    const row = totals.get(key) ?? { exercise: day.exercise, unit: day.unit ?? '', total: 0, days: 0, goalsHit: 0, best: 0, bestDate: '' }
     row.total += day.count
     row.days += 1
     if (isDone(day)) row.goalsHit += 1
@@ -81,7 +88,7 @@ export const exerciseTotals = (ledger: readonly Day[]): ExerciseTotal[] => {
       row.best = day.count
       row.bestDate = day.date
     }
-    totals.set(day.exercise, row)
+    totals.set(key, row)
   }
   return [...totals.values()].sort((a, b) => b.total - a.total)
 }
@@ -97,7 +104,8 @@ export const bestStreak = (ledger: readonly Day[]) => {
   let best = 0
   let run = 0
   let last: number | undefined
-  for (const day of ledger.filter(keepsStreak)) {
+  for (const [day] of byDate(ledger).filter(keepsDateStreak)) {
+    if (day === undefined) continue
     const noon = noonOf(day.date)
     run = last !== undefined && Math.round((noon - last) / DAY_MS) === 1 ? run + 1 : 1
     best = Math.max(best, run)
@@ -111,7 +119,7 @@ export const bestStreak = (ledger: readonly Day[]) => {
 export const rangeSummary = (ledger: readonly Day[], exercise: string, now: number, days: number) => {
   const span = lastDays(now, days * 2)
   const [priorFrom, priorTo, from, to] = [span[0], span[days - 1], span[days], span[days * 2 - 1]].map(ms => dayKey(ms ?? now)) as [string, string, string, string]
-  const own = ledger.filter(day => day.exercise === exercise)
+  const own = ledger.filter(day => sameExercise(day.exercise, exercise) && day.count > 0)
   const inRange = within(own, from, to)
   const total = sum(inRange)
   const prior = sum(within(own, priorFrom, priorTo))
@@ -139,17 +147,17 @@ export const bucketLabel = (bucket: number) =>
   bucket === 1 ? 'a bar a day' : bucket === 7 ? 'a bar a week' : `a bar per ${bucket / 7} weeks`
 
 // Every exercise on one timeline, oldest first. Buckets count back from today, so
-// only the oldest can be short. A day holds one exercise, so a stack needs a bucket.
+// only the oldest can be short. A multi day stacks its exercises in one bar.
 export const chartBars = (ledger: readonly Day[], colors: ExerciseColors, now: number, days: number, columns: number): Bar[] => {
-  const byDate = new Map(ledger.map(day => [day.date, day]))
+  const dated = entriesByDate(ledger)
   const span = lastDays(now, days).map(dayKey)
   const bucket = bucketDays(days, columns)
   const bars: Bar[] = []
   for (let end = span.length; end > 0; end -= bucket) {
-    const sessions = span.slice(Math.max(0, end - bucket), end).flatMap(date => byDate.get(date) ?? [])
+    const sessions = span.slice(Math.max(0, end - bucket), end).flatMap(date => dated.get(date) ?? [])
     // Stacked in colour order, so a hue sits low or high the same way in every bar.
     const segments = [...colors].flatMap(([exercise, hue]) => {
-      const own = sessions.filter(day => day.exercise === exercise)
+      const own = sessions.filter(day => sameExercise(day.exercise, exercise))
       return [
         { reps: sum(own.filter(isDone)), color: hue },
         { reps: sum(own.filter(day => !isDone(day))), color: faded(hue) },
@@ -263,7 +271,7 @@ export const yearCells = (ledger: readonly Day[], colors: ExerciseColors, now: n
   const today = lastDays(now, 1)[0] ?? now
   const thisSunday = today - new Date(today).getDay() * DAY_MS
   const sundays = Array.from({ length: weeks }, (_, i) => thisSunday - (weeks - 1 - i) * 7 * DAY_MS)
-  const byDate = new Map(ledger.map(day => [day.date, day]))
+  const dated = entriesByDate(ledger)
   const colorOn = (sunday: number, weekday: number) => {
     const ms = sunday + weekday * DAY_MS
     // Noon anchors can drift an hour across DST: compare days, not times.
@@ -271,9 +279,11 @@ export const yearCells = (ledger: readonly Day[], colors: ExerciseColors, now: n
     const todayKey = dayKey(today)
     if (date > todayKey || weekday > 6) return DEFAULT
     if (date === todayKey) return TODAY
-    const day = byDate.get(date)
-    if (day === undefined) return EMPTY
-    return isDone(day) ? colorOf(colors, day.exercise) : faded(colorOf(colors, day.exercise))
+    const entries = dated.get(date)
+    // A multi day wears its first trained exercise's hue, bright only when every exercise hit.
+    const first = entries?.find(day => day.count > 0) ?? entries?.[0]
+    if (entries === undefined || first === undefined) return EMPTY
+    return isDateDone(entries) ? colorOf(colors, first.exercise) : faded(colorOf(colors, first.exercise))
   }
   const rows = 4
   const words = new Uint32Array(weeks * rows * 3)
