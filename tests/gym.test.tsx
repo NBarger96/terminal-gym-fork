@@ -2455,14 +2455,15 @@ describe('multi days', () => {
   })
 
   // routine.json as the mod left it: a day's goals read as the file holds them, single or multi.
-  type FileDay = { goal?: unknown; exercises?: { goal?: unknown }[] }
   const routineFile = (files: Map<string, string>): Record<string, unknown> => {
     const raw: unknown = JSON.parse(files.get(ROUTINE) ?? '{}')
     return typeof raw === 'object' && raw !== null ? { ...raw } : {}
   }
-  const goalsOf = (routine: Record<string, unknown>, weekday: string) => {
-    const day = routine[weekday] as FileDay | undefined
-    return day?.exercises?.map(entry => entry.goal) ?? [day?.goal]
+  const goalOf = (entry: unknown): unknown => (typeof entry === 'object' && entry !== null && 'goal' in entry ? entry.goal : undefined)
+  const goalsOf = (routine: Record<string, unknown>, weekday: string): unknown[] => {
+    const entry = routine[weekday]
+    if (typeof entry === 'object' && entry !== null && 'exercises' in entry && Array.isArray(entry.exercises)) return entry.exercises.map(goalOf)
+    return [goalOf(entry)]
   }
 
   test('progressive goals on a single-day routine work as before', { options: { progress: true } }, async ($, on) => {
@@ -2830,18 +2831,22 @@ describe('multi days', () => {
   test('a narrow band truncates a row\'s line, not its buttons', async ($, on) => {
     multiWorld(on, armsMonday())
     await start($)
-    const textBox = async (columns: number) => {
+    // The row's line, its first child: its type and the width it is held to, read with checks.
+    const lineOf = async (columns: number) => {
       const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: columns } })
       const row = await ui.find({ key: 'row-plank' })
       await ui.unmount()
-      return row?.children[0] as { type: string; props?: Record<string, unknown> } | undefined
+      expect(row).toBeDefined()
+      const line: unknown = row?.children[0]
+      if (typeof line !== 'object' || line === null || !('type' in line)) throw new Error(`row-plank has no line at ${columns} columns`)
+      const props: unknown = 'props' in line ? line.props : undefined
+      const width = typeof props === 'object' && props !== null && 'width' in props ? props.width : undefined
+      return { type: line.type, width }
     }
     // The line gets the columns plank's buttons leave.
     expect(buttonsWidth(['+5s', '+15s', '+20s'])).toBe(25)
-    expect(await textBox(30)).toMatchObject({ type: 'Box', props: { width: 5 } })
-    const wide = await textBox(100)
-    expect(wide?.type).toBe('Box')
-    expect(wide?.props?.width).toBeUndefined()
+    expect(await lineOf(30)).toEqual({ type: 'Box', width: 5 })
+    expect(await lineOf(100)).toEqual({ type: 'Box', width: undefined })
   })
 
   test('a typed name matches an exercise in any case, or by the only name it starts', () => {
@@ -3150,6 +3155,11 @@ describe('custom days', () => {
     name: 'arms',
     exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'pushups', goal: 100 }, { exercise: 'plank', goal: 180, unit: 's' }],
   }
+  // The routine customDays returned: an errors result fails the test with its errors.
+  const routineFrom = (typed: ReturnType<typeof customDays>) => {
+    if (!('routine' in typed)) throw new Error(`customDays refused the lines: ${typed.errors.join('; ')}`)
+    return typed.routine
+  }
   type Mounted = Awaited<ReturnType<Engine['ui']['mount']>>
   // With no routine of their own, program-3 is Custom goals and program-4 Custom days; with one, each is one later.
   const openDays = async ($: Engine, program = 'program-4') => {
@@ -3253,8 +3263,7 @@ describe('custom days', () => {
     }
     const base = asRoutine(raw)
     const lines = { mon: dayLine(base.mon), tue: 'Arms: 120 dips, 10 a, 10 b', wed: '300 squats, 50 lunges', thu: '', fri: '', sat: '', sun: '' }
-    const typed = customDays(base, lines)
-    const routine = 'routine' in typed ? typed.routine : {}
+    const routine = routineFrom(customDays(base, lines))
     // Thursday's line was emptied, so it goes.
     expect(daysOverFile(raw, routine, base)).toEqual({
       _note: 'mine',
@@ -3268,11 +3277,7 @@ describe('custom days', () => {
   test('a repeat left out of a retyped day stays while its first is typed, and goes once the line takes that out', () => {
     const raw = { mon: { exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'pushups', goal: 50 }, { exercise: 'dips', goal: 80, cue: 'x' }] } }
     const base = asRoutine(raw)
-    const retyped = (line: string) => {
-      const typed = customDays(base, { mon: line })
-      expect(typed).toMatchObject({ routine: {} })
-      return daysOverFile(raw, 'routine' in typed ? typed.routine : base, base).mon
-    }
+    const retyped = (line: string) => daysOverFile(raw, routineFrom(customDays(base, { mon: line })), base).mon
     expect(retyped('100 dips, 20 squats')).toEqual({ exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'squats', goal: 20 }, { exercise: 'dips', goal: 80, cue: 'x' }] })
     // With the first dips gone, the repeat would join the plan, so it goes.
     expect(retyped('50 pushups, 20 squats')).toEqual({ exercises: [{ exercise: 'pushups', goal: 50 }, { exercise: 'squats', goal: 20 }] })
