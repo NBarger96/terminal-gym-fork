@@ -19,7 +19,6 @@ import {
   setSizeFor,
   stepFor,
   buttonsWidth,
-  canProgress,
   cells,
   cheer,
   customRoutine,
@@ -48,11 +47,11 @@ import {
   parseRoutineDay,
   pickSwap,
   progressColor,
+  progressesAt,
   repSteps,
   routineToFile,
   scale,
   single,
-  singleDays,
   streak,
   typedGoal,
   weekdayKey,
@@ -174,10 +173,8 @@ const writeSwap = async ($: Engine, date: string, day: RoutineDay) =>
 const readRest = async ($: Engine, path: string) =>
   (await $.fs.exists(path)) && (await $.fs.read(path)).trim() !== 'off'
 
-// Progressive goals: at the day's first look, today's exercise moves on from
-// its last sessions, the next time it comes around. Days before are frozen at
-// the goals they were trained at first. Two sessions at once compute the same
-// move, and the second finds the routine already moved, so a goal moves once.
+// At the day's first look each of today's exercises moves on from its last sessions; days before keep their goals.
+// Two sessions at once compute the same move and the second finds it made, so a goal moves once.
 const progress = async ($: Engine, date: string) => {
   if (!progressConfig.isOn || progressedOn === date) return
   progressedOn = date
@@ -186,24 +183,26 @@ const progress = async ($: Engine, date: string) => {
   if (await $.fs.exists(`${logDir}/${date}.swap`)) return
   const routine = await loadRoutine($, routinePath)
   const now = await $.clock.now()
-  const day = routine[weekdayKey(now)]
-  // A multi day moves nothing until progressive goals move each of its exercises.
-  if (day === undefined || isMultiDay(day)) return
-  const plan = day.plans[0]
-  const singles = singleDays(routine)
-  if (plan === undefined || !canProgress(singles, plan.exercise)) return
+  const plans = (routine[weekdayKey(now)]?.plans ?? []).filter(plan => progressesAt(routine, plan.exercise, plan.goal))
+  if (plans.length === 0) return
   const before = lastDays(now, HISTORY_DAYS).slice(0, -1).reverse()
-  // Sessions on single days only: a multi day's exercise is no session of this goal yet.
-  const days = (await Promise.all(before.map(ms => readDated($, routine, logDir, ms)))).flatMap(d => (d.isMulti ? [] : d.entries))
-  const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
-  if (to === undefined) return
+  // Every exercise's sessions, single days and multi alike; an exercise with no reps that day had none.
+  const days = (await Promise.all(before.map(ms => readDay($, routine, logDir, ms)))).flat()
+  const moves = plans.flatMap(plan => {
+    const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
+    return to === undefined ? [] : [{ plan, to }]
+  })
+  if (moves.length === 0) return
   await freezePastDays($, routine)
-  // Single days move; multi days, and any entry the reader left out, stay as the file has them.
-  if (!(await writeGoals($, routinePath, moveGoal(singles, plan.exercise, plan.goal, to)))) return
-  const unit = plan.unit ?? ''
-  toast($, to > plan.goal
-    ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
-    : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`)
+  const movedRoutine = moves.reduce((soFar, { plan, to }) => moveGoal(soFar, plan.exercise, plan.goal, to), routine)
+  // Goals alone: a day's name, its other entries and any entry the reader left out stay as the file has them.
+  if (!(await writeGoals($, routinePath, movedRoutine))) return
+  toast($, moves.map(({ plan, to }) => {
+    const unit = plan.unit ?? ''
+    return to > plan.goal
+      ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
+      : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`
+  }).join(' '))
 }
 
 // Today from disk, with its pace file: refreshPace needs both, and reads the file once.
@@ -600,18 +599,16 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   await refreshPace($)
   const { goal, unit } = was
   if (goal > 0 && was.count < goal && count >= goal) {
+    // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
+    // next session of it goes. A swap counts; a goal of its own does not.
+    const isPlanned = progressConfig.isOn && progressesAt(await loadRoutine($, (await files($)).routine), was.exercise, goal)
+    const next = isPlanned ? ` Next ${was.exercise} day: ${goal + stepFor(goal)}${unit}.` : ''
     const left = exercises.filter(e => e.goal > 0 && e.count < e.goal)
     if (after.isMulti && left.length > 0) {
-      toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.`)
+      toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.${next}`)
     } else if (after.isMulti) {
-      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.`)
+      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.${next}`)
     } else {
-      // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
-      // next session of it goes. A swap counts; a goal of its own does not; a multi day moves nothing yet.
-      const routine = singleDays(await loadRoutine($, (await files($)).routine))
-      const isPlanned = progressConfig.isOn && !after.isMulti && canProgress(routine, was.exercise) &&
-        allPlans(routine).some(plan => plan.exercise === was.exercise && plan.goal === goal)
-      const next = isPlanned ? ` Next ${was.exercise} day: ${goal + stepFor(goal)}${unit}.` : ''
       toast($, `✅ Done. ${count}/${goal}${unit} ${was.exercise}. That's the work.${next}`)
     }
   } else if (added > 0) {

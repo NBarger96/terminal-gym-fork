@@ -26,10 +26,6 @@ export const routineToFile = (routine: Routine) =>
 // Every plan in a routine, day by day, multi days' exercises in their order.
 export const allPlans = (routine: Routine) => Object.values(routine).flatMap(day => day.plans)
 
-// The routine's single days alone: what progressive goals move until they move multi days too.
-export const singleDays = (routine: Routine): Routine =>
-  Object.fromEntries(Object.entries(routine).filter(([, day]) => !isMultiDay(day)))
-
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
 export const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof raw === 'object' && raw !== null && !Array.isArray(raw)
@@ -498,6 +494,10 @@ export const nextGoal = (goal: number, past: readonly Day[]) => {
 export const canProgress = (routine: Routine, exercise: string) =>
   new Set(allPlans(routine).filter(plan => plan.exercise === exercise).map(plan => plan.goal)).size === 1
 
+// Whether a session at `goal` moves the exercise on: the routine's one goal for it, not a goal of its own.
+export const progressesAt = (routine: Routine, exercise: string, goal: number) =>
+  canProgress(routine, exercise) && allPlans(routine).some(plan => plan.exercise === exercise && plan.goal === goal)
+
 // The routine with an exercise's goal moved: only the days at the old goal, so
 // days a custom program set apart keep theirs.
 export const moveGoal = (routine: Routine, exercise: string, from: number, to: number): Routine =>
@@ -677,7 +677,8 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - a toast lists what is left when an exercise finishes, and every count when the day does
 - a finished exercise shows ✅; the day counts once for the streak, and as hit when every exercise is
 - entries with no name, a goal of 0 or less, a repeated name or past the fifth are left out, and a toast names them
-- not yet on a multi day: \`/fit swap\`, \`/fit goal\`, \`/fit window\`, \`/fit snooze\`, strict holds and progressive goals
+- with progressive goals on, each exercise's goal moves on its own sessions
+- not yet on a multi day: \`/fit swap\`, \`/fit goal\`, \`/fit window\`, \`/fit snooze\` and strict holds
 
 ### Your data
 Stays on this machine, in \`~/.claude/fitness\`.`
