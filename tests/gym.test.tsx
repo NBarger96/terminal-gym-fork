@@ -14,7 +14,13 @@ const MONDAY_9AM = new Date(2026, 9, 5, 9).getTime()
 const world = (
   on: On,
   files = new Map<string, string>(),
-  { introduced = true, store = {} as Record<string, unknown>, now = MONDAY_9AM, storeGate = Promise.resolve() } = {},
+  {
+    introduced = true,
+    store = {} as Record<string, unknown>,
+    now = MONDAY_9AM,
+    storeGate = Promise.resolve(),
+    env = { HOME } as Record<string, string>,
+  } = {},
 ) => {
   const clock = mock.clock(on, { now })
   // By hand, not mock.store, so a test can read back what the mod kept.
@@ -30,7 +36,7 @@ const world = (
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...stored.keys()] }))
-  mock.env(on, { HOME })
+  mock.env(on, env)
   const toasts: string[] = []
   on('fs.read', ($, e) => {
     const text = files.get(e.path)
@@ -108,7 +114,10 @@ const world = (
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  return { clock, files, touch, toasts, open, config, calls, registered, below, box, stored }
+  // The conversation's id: /clear and /resume change it.
+  const session = { id: 's1' }
+  on('session.id', () => ({ value: session.id }))
+  return { clock, files, touch, toasts, open, config, calls, registered, below, box, stored, session }
 }
 
 // A day's pace file, as the mod writes it beside the count.
@@ -855,6 +864,32 @@ test('/clear and /resume run the setup again', async ($, on) => {
   expect(registered).toEqual(['fit', 'fit', 'fit'])
   await $.classic.SessionStart({ source: 'compact' })
   expect(registered).toEqual(['fit', 'fit', 'fit'])
+})
+
+test('a new conversation runs the setup again when classic.SessionStart never arrives', async ($, on) => {
+  const { registered, session } = world(on)
+  await start($)
+  expect(registered).toEqual(['fit'])
+  // Same conversation: nothing runs again.
+  await send($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(registered).toEqual(['fit'])
+  // /clear with the classic event passed on past the mod: the next prompt
+  // sees the new id and runs the setup once, not again for its turn.
+  session.id = 's2'
+  await send($, '/fit 10')
+  await $.turn.start({ text: 'go', turnId: 't2' })
+  expect(registered).toEqual(['fit', 'fit'])
+})
+
+test('with no HOME, as on Windows, the data goes under USERPROFILE', async ($, on) => {
+  const files = new Map<string, string>()
+  world(on, files, { env: { USERPROFILE: 'C:\\Users\\t' } })
+  await start($)
+  // The engine writes native separators, so compare with slashes.
+  const written = [...files.keys()].map(path => path.replace(/\\/g, '/'))
+  expect(written).toContain('C:/Users/t/.claude/fitness/routine.json')
+  expect(written.some(path => path.startsWith('/.claude'))).toBe(false)
 })
 
 test('easy mode still waits for a long turn before nudging', async ($, on) => {

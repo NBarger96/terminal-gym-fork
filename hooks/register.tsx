@@ -70,6 +70,8 @@ let seenOnDisk = ''
 // a goal for, so the check runs once a day.
 const progressConfig = { isOn: false }
 let progressedOn = ''
+// The conversation the setup last ran for. /clear and /resume change it.
+let bootedFor = ''
 
 const today = atom({ plugin: 'terminal-gym', key: 'today' } as const, null)
 const olderStreak = atom({ plugin: 'terminal-gym', key: 'olderStreak' } as const, 0)
@@ -91,7 +93,10 @@ const onboardPick = atom({ plugin: 'terminal-gym', key: 'onboardPick' } as const
 
 // Same files as the `fit` shell script, so both agree.
 const files = async ($: Engine) => {
-  const dir = `${(await $.env.get('HOME')) ?? ''}/.claude/fitness`
+  // Windows sets USERPROFILE and often no HOME; with neither, the path would
+  // land at the drive root.
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  const dir = `${home}/.claude/fitness`
   return { routine: `${dir}/routine.json`, log: `${dir}/log` }
 }
 
@@ -641,8 +646,18 @@ const SAMPLE_DAYS: Day[] = [1, 1, 0.4, 1, 1, 0, 1, 1, 1, 0.6, 1, 1, 1, 0.3].map(
   isSkipped: false,
 }))
 
+// The conversation's id, or '' where the engine can't say.
+const conversationId = async ($: Engine) => {
+  try {
+    return await $.session.id()
+  } catch {
+    return ''
+  }
+}
+
 // Everything a conversation needs: the /fit command and today's state.
 const boot = async ($: Engine) => {
+  bootedFor = await conversationId($)
   const introduced = (await $.store.get('introduced')) === true
   await update($, isIntroduced, () => introduced)
   const range = await $.store.get('chartDays')
@@ -668,6 +683,17 @@ const boot = async ($: Engine) => {
     argumentHint: '[n | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
     immediate: true,
   })
+}
+
+// The setup again when the conversation changed since it last ran. A managed
+// plugin (cc-plugin-sec-default) can pass classic.SessionStart on past this
+// mod, so prompts and turns check too.
+const bootIfSwitched = async ($: Engine) => {
+  const id = await conversationId($)
+  if (id === '' || id === bootedFor) return
+  // Claimed before the await, so a prompt and its turn don't both run it.
+  bootedFor = id
+  await boot($)
 }
 
 export const register: Register = (on, options) => {
@@ -878,6 +904,7 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await bootIfSwitched($)
     // Only prompts the person typed count: background tasks, loops and other
     // sessions start turns too. Slash commands (like /fit 10) always pass.
     const isTyped = e.origin.kind === 'composer' && !e.text.trimStart().startsWith('/')
@@ -901,6 +928,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    await bootIfSwitched($)
     timer?.cancel()
     if (!isStrict && options.nudges !== false) timer = $.clock.after(nudgeMs, () => void nudge($))
     return next(e)
