@@ -63,6 +63,8 @@ export type Pace = {
   isOpening?: boolean
   // The breather is a `/fit snooze`: the set was put off, not partly done.
   isPutOff?: boolean
+  // A multi day's pace is in percent of the day, so every text that prints its numbers adds this.
+  unit?: '%'
 }
 
 declare module 'claude-code' {

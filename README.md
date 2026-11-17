@@ -93,7 +93,9 @@ The day counts once for your streak when any exercise has reps, and as hit on th
 
 An entry with no name, a goal of 0 or less, a name already listed (in any case), or past the fifth is left out, and one toast names every entry left out. A day whose list ends up empty has no plan.
 
-Not on a multi day yet: strict mode holds no prompt and runs no set schedule, and `/fit swap`, `/fit goal`, `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
+Strict mode paces a multi day as a whole, in percent of the day. Each exercise's share of its goal is capped at 100%, and the day's share is the average of those, so extra dips never cover a skipped plank. The day is 10 sets of 10%, spread over the training window like a single day's sets. A set reminder and a held prompt suggest a real set, a tenth of an exercise's goal, starting with the exercise you logged last or else the first one unfinished: with 100 dips and 180s of plank, *"⏱ Set due: 10% of arms, e.g. 10 dips or 18s plank. 20/100% by now."* Breathers, `/fit snooze` and `/fit window` keep their rules in those percent: what you owe, a breather's length and a `/fit window`'s spread are shares of the day. A set you log is measured against its own row's buttons, as on a single day: the row's smallest **+** or more earns the whole breather, fewer reps their share, and reps past that exercise's goal earn nothing. The band's status row shows the share due, such as `10% due now`, and a day with no name is called by its exercises, `10% of dips · plank`.
+
+Not on a multi day yet: `/fit swap` and `/fit goal` say they don't work there. `/fit reset` puts every exercise back to 0.
 
 ## The scoreboard
 
