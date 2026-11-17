@@ -643,9 +643,12 @@ const thenToday = (t: Today, paceLine = '') => `${t.isMulti ? '\n' : ' '}${today
 // one setting can't fit reps and seconds alike.
 const setSizeOf = (t: Today, e: TodayExercise) => setSizeFor(e.goal, t.isMulti ? 0 : paceConfig.setSize)
 
+const DAMAGED_LOG = "Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0."
+
 // Writes one exercise's new count, `last`, and what follows: breathers, toasts.
 // `exercise` names the one logged; absent, a bare /fit's target (focusOf).
-const logReps = async ($: Engine, change: (count: number) => number, exercise?: string) => {
+// `refused` says why nothing was logged, for a /fit reply; a press hears it as a toast.
+const logReps = async ($: Engine, change: (count: number) => number, exercise?: string): Promise<{ t: Today; refused?: string }> => {
   const owed = await refreshPace($)
   const before = await refreshToday($)
   const at = exercise === undefined ? logTarget(before.exercises, before.last) : before.exercises.findIndex(e => sameExercise(e.exercise, exercise))
@@ -653,14 +656,14 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   // A press from a band drawn before the plan changed: log nothing rather than the wrong exercise.
   if (was === undefined) {
     toast($, `${exercise ?? 'That exercise'} isn't on today's plan any more.`)
-    return before
+    return { t: before, refused: `${exercise ?? 'That exercise'} isn't on today's plan any more, so nothing logged.` }
   }
   const logPath = `${(await files($)).log}/${before.date}`
   // Another session's write still landing: writing over it would lose its counts.
   const text = await readLog($, logPath)
   if (isDamagedLog(text)) {
-    toast($, "Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0.")
-    return before
+    toast($, DAMAGED_LOG)
+    return { t: before, refused: DAMAGED_LOG }
   }
   const count = Math.max(0, change(was.count))
   const exercises = before.exercises.map((e, i) => (i === at ? { ...e, count } : e))
@@ -719,11 +722,12 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
     }
   } else if (added > 0) {
     toast($, cheer(added, count, goal, was.exercise, unit))
-  } else if (added < 0 && after.isMulti) {
-    // A multi day names which count went down, since the band shows several.
-    toast($, `${was.exercise} back to ${count}${unit}.${goal > count ? ` ${goal - count}${unit} to go.` : ''}`)
+  } else if (after.isMulti) {
+    // A multi day names the count that went down or stayed, since the band shows several.
+    const left = goal > count ? ` ${goal - count}${unit} to go.` : goal > 0 && added === 0 ? ' Done.' : ''
+    toast($, `${was.exercise} ${added < 0 ? 'back to' : 'stays at'} ${count}${unit}.${left}`)
   }
-  return after
+  return { t: after }
 }
 
 // `/fit reset`: every exercise today back to 0, with no breather and no `last`. A log
@@ -1013,9 +1017,10 @@ export const register: Register = (on, options) => {
           exercise = names[match.index]
         }
         const n = cmd.n
-        const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
+        const { t, refused } = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
+        // A damaged log, or the plan changed under the command: nothing logged, so no count line.
+        if (refused !== undefined) return { text: refused }
         const logged = exercise === undefined ? focusOf(t) : t.exercises.find(e => sameExercise(e.exercise, exercise))
-        // The plan changed under the command: logReps logged nothing and toasted why.
         if (logged === undefined) return { text: `${exercise} isn't on today's plan any more, so nothing logged.` }
         return { text: `${line(logged)}${t.isMulti ? leftText(logged) : ''}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
       }

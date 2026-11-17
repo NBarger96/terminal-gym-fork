@@ -2130,12 +2130,23 @@ describe('multi days', () => {
     expect(toasts).toContain('pushups back to 30. 20 to go.')
   })
 
+  test('a log that leaves a count as it was still names the exercise and what is left', async ($, on) => {
+    const { toasts } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":20,"pushups":50,"plank":0}\n']]))
+    await start($)
+    await fit($, '0')
+    expect(toasts).toContain('dips stays at 20. 80 to go.')
+    await fit($, 'set 50 pushups')
+    expect(toasts).toContain('pushups stays at 50. Done.')
+  })
+
   test('a damaged multi log is never written over by a log, and /fit reset is the way out', async ($, on) => {
     const { files, toasts } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pus']]))
     await start($)
-    await fit($, '10')
+    const refused = "Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0."
+    // The reply says so too, with no count line that reads like a set logged.
+    expect((await fit($, '10')).text).toBe(refused)
     expect(files.get(TODAY_LOG)).toBe('{"dips":40,"pus')
-    expect(toasts).toContain("Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0.")
+    expect(toasts).toContain(refused)
     // Still damaged on reset's own second read: written over on purpose, and logging works again.
     expect((await fit($, 'reset')).text).toContain('0/100 dips')
     expect(files.get(TODAY_LOG)).toBe('{"dips":0,"pushups":0,"plank":0}\n')
