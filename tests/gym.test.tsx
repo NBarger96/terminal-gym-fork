@@ -3,7 +3,10 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customRoutine, heatCells, moveGoal, nextGoal, paceAt, parseCustom, parseFit, pickSwap, progressColor, repSteps, scale, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customRoutine, describeRoutine, exerciseGoals, formatDayLog, heatCells, moveGoal, nextGoal, paceAt, parseCustom, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, repSteps, routineToFile, scale, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+
+// A routine as routine.json would hold it, read into the shape the helpers take.
+const asRoutine = (raw: object) => parseRoutine(raw).routine
 
 const HOME = '/home/t'
 const LOG = `${HOME}/.claude/fitness/log`
@@ -20,8 +23,11 @@ const world = (
     now = MONDAY_9AM,
     storeGate = Promise.resolve(),
     env = { HOME } as Record<string, string>,
+    // The engine on Windows passes `/home/t/x` as `C:\home\t\x`; this keys files as `/home/t/x`.
+    slashes = false,
   } = {},
 ) => {
+  const at = (path: string) => (slashes ? path.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '') : path)
   const clock = mock.clock(on, { now })
   // By hand, not mock.store, so a test can read back what the mod kept.
   const stored = new Map<string, unknown>(Object.entries({ ...(introduced ? { introduced: true } : {}), ...store }))
@@ -39,7 +45,7 @@ const world = (
   mock.env(on, env)
   const toasts: string[] = []
   on('fs.read', ($, e) => {
-    const text = files.get(e.path)
+    const text = files.get(at(e.path))
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -50,7 +56,7 @@ const world = (
     mtimes.set(path, clock.now())
   }
   on('fs.write', ($, e) => {
-    touch(e.path, e.text)
+    touch(at(e.path), e.text)
     return { value: undefined }
   })
   const entry = (path: string) => ({
@@ -59,22 +65,27 @@ const world = (
     mtimeMs: mtimes.get(path) ?? 0,
     isLink: false,
   })
-  on('fs.list', ($, e) => ({
-    value: [...files.keys()]
-      .filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
-      .map(path => ({ name: path.slice(e.path.length + 1), ...entry(path) })),
-  }))
+  on('fs.list', ($, e) => {
+    const dir = at(e.path)
+    return {
+      value: [...files.keys()]
+        .filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
+        .map(path => ({ name: path.slice(dir.length + 1), ...entry(path) })),
+    }
+  })
   on('fs.stat', ($, e) => {
-    if (files.has(e.path)) return { value: entry(e.path) }
-    const isDir = [...files.keys()].some(path => path.startsWith(`${e.path}/`))
+    const path = at(e.path)
+    if (files.has(path)) return { value: entry(path) }
+    const isDir = [...files.keys()].some(file => file.startsWith(`${path}/`))
     if (!isDir) throw new Error(`ENOENT ${e.path}`)
     return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
   })
   const calls: string[] = []
   on('fs.exists', ($, e) => {
     calls.push('fs.exists')
-    const isDir = [...files.keys()].some(path => path.startsWith(`${e.path}/`))
-    return { value: files.has(e.path) || isDir }
+    const path = at(e.path)
+    const isDir = [...files.keys()].some(file => file.startsWith(`${path}/`))
+    return { value: files.has(path) || isDir }
   })
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
@@ -174,7 +185,9 @@ describe('lib', () => {
   })
 
   test('streak counts days with any reps and forgives an empty today', async () => {
-    const day = (count: number, isSkipped = false) => ({ date: 'd', count, goal: 100, exercise: 'dips', isSkipped })
+    // Each its own date: entries that share one are one day's exercises.
+    let n = 0
+    const day = (count: number, isSkipped = false) => ({ date: `d${n++}`, count, goal: 100, exercise: 'dips', isSkipped })
     expect(streak([day(0), day(100), day(120), day(40)])).toBe(3)
     expect(streak([day(0), day(100), day(40), day(0)])).toBe(2)
     expect(streak([day(100), day(100, true), day(100)])).toBe(1)
@@ -185,9 +198,9 @@ describe('lib', () => {
 
 describe('setup helpers', () => {
   test('custom routines, scaling and colors', async () => {
-    expect(parseCustom('30 burpees')?.mon).toEqual({ exercise: 'burpees', goal: 30 })
+    expect(parseCustom('30 burpees')?.mon).toEqual(asRoutine({ mon: { exercise: 'burpees', goal: 30 } }).mon)
     expect(parseCustom('burpees')).toBeUndefined()
-    expect(scale({ mon: { exercise: 'dips', goal: 100 } }, 0.5).mon?.goal).toBe(50)
+    expect(scale(asRoutine({ mon: { exercise: 'dips', goal: 100 } }), 0.5).mon?.plans[0]?.goal).toBe(50)
     expect(progressColor(0, 100)).toBeUndefined()
     expect(progressColor(1, 100)).toBe('#d7af5f')
     expect(progressColor(33, 100)).toBe('#d7af5f')
@@ -554,9 +567,9 @@ describe('walkthrough', () => {
   })
 
   test('custom goals left as filled keep days that differ', async () => {
-    const base = { mon: { exercise: 'pushups', goal: 100 }, thu: { exercise: 'pushups', goal: 50 }, tue: { exercise: 'dips', goal: 80 } }
+    const base = asRoutine({ mon: { exercise: 'pushups', goal: 100 }, thu: { exercise: 'pushups', goal: 50 }, tue: { exercise: 'dips', goal: 80 } })
     expect(customRoutine(base, { pushups: '100', dips: '80' })).toEqual(base)
-    expect(customRoutine(base, { pushups: '120', dips: '80' })?.thu?.goal).toBe(120)
+    expect(customRoutine(base, { pushups: '120', dips: '80' })?.thu?.plans[0]?.goal).toBe(120)
     expect(customRoutine(base, { pushups: '', dips: '80' })).toBeUndefined()
   })
 
@@ -600,11 +613,11 @@ test('/fit program opens the walkthrough', async ($, on) => {
 
 describe('swap', () => {
   test('pickSwap cycles or picks by name', async () => {
-    const routine = {
+    const routine = asRoutine({
       mon: { exercise: 'pushups', goal: 100 },
       tue: { exercise: 'dips', goal: 100 },
       wed: { exercise: 'squats', goal: 300 },
-    }
+    })
     expect(pickSwap(routine, 'pushups')?.exercise).toBe('dips')
     expect(pickSwap(routine, 'squats')?.exercise).toBe('pushups')
     expect(pickSwap(routine, 'pushups', 'squats')).toEqual({ exercise: 'squats', goal: 300 })
@@ -848,9 +861,9 @@ test('score rows name each day\'s exercise', async ($, on) => {
 })
 
 test('the grid leaves a blank row between weeks', async () => {
-  const day = { date: 'd', count: 0, goal: 100, exercise: 'dips', isSkipped: false }
-  expect(heatCells(Array.from({ length: 28 }, () => day)).rows).toBe(7)
-  expect(heatCells(Array.from({ length: 7 }, () => day)).rows).toBe(1)
+  const day = (i: number) => ({ date: `d${i}`, count: 0, goal: 100, exercise: 'dips', isSkipped: false })
+  expect(heatCells(Array.from({ length: 28 }, (_, i) => day(i))).rows).toBe(7)
+  expect(heatCells(Array.from({ length: 7 }, (_, i) => day(i))).rows).toBe(1)
 })
 
 test('/clear and /resume run the setup again', async ($, on) => {
@@ -1415,13 +1428,13 @@ describe('progressive goals', () => {
 
   test('moving a goal leaves days a custom program set apart', async () => {
     const routine = { mon: { exercise: 'pushups', goal: 100 }, thu: { exercise: 'pushups', goal: 50 }, tue: { exercise: 'dips', goal: 100 } }
-    expect(moveGoal(routine, 'pushups', 100, 105)).toEqual({ ...routine, mon: { exercise: 'pushups', goal: 105 } })
+    expect(moveGoal(asRoutine(routine), 'pushups', 100, 105)).toEqual(asRoutine({ ...routine, mon: { exercise: 'pushups', goal: 105 } }))
   })
 
   test('an exercise with two goals in one routine stays put, and promises nothing', { options: { progress: true } }, async ($, on) => {
     const routine = { mon: { exercise: 'pushups', goal: 100 }, thu: { exercise: 'pushups', goal: 50 }, sun: { exercise: 'pushups', goal: 100 } }
-    expect(canProgress(routine, 'pushups')).toBe(false)
-    expect(canProgress({ mon: routine.mon, sun: routine.sun }, 'pushups')).toBe(true)
+    expect(canProgress(asRoutine(routine), 'pushups')).toBe(false)
+    expect(canProgress(asRoutine({ mon: routine.mon, sun: routine.sun }), 'pushups')).toBe(true)
     const { files, toasts } = world(on, new Map([[ROUTINE, JSON.stringify(routine)], [`${LOG}/2026-10-04`, '100\n']]))
     await start($)
     expect(routineOf(files).mon.goal).toBe(100)
@@ -1919,5 +1932,337 @@ describe('the scoreboard pane', () => {
     }
     // An unlogged day in the grid stays unwritten, as before.
     expect(files.has(`${LOG}/2026-10-03.swap`)).toBe(false)
+  })
+})
+
+describe('multi days', () => {
+  const ROUTINE = `${HOME}/.claude/fitness/routine.json`
+  const TODAY_LOG = `${LOG}/2026-10-05`
+  const ARMS = {
+    name: 'Arms day',
+    exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'pushups', goal: 50 }, { exercise: 'plank', goal: 180, unit: 's' }],
+  }
+  const WEEK = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+  // Monday the 5th, today, is an arms day; Tuesday stays a single day.
+  const armsMonday = (more: [string, string][] = []) =>
+    new Map<string, string>([[ROUTINE, JSON.stringify({ mon: ARMS, tue: { exercise: 'dips', goal: 100 } })], ...more])
+  const armsDaily = (more: [string, string][] = []) =>
+    new Map<string, string>([[ROUTINE, JSON.stringify(Object.fromEntries(WEEK.map(d => [d, ARMS])))], ...more])
+  // Paths keyed with slashes, so these run on Windows too.
+  const multiWorld = (on: On, files: Map<string, string>) => world(on, files, { slashes: true })
+  const dayState = (files: Map<string, string>) => JSON.parse(files.get(`${TODAY_LOG}.day`) ?? '{}')
+  const NOT_YET = 'does not work on a multi day yet'
+
+  test('routine.json reads both forms and writes each back as it came', () => {
+    const raw = {
+      mon: ARMS,
+      tue: { exercise: 'dips', goal: 100 },
+      wed: { exercises: [{ exercise: 'squats', goal: 300 }, { exercise: 'lunges', goal: 60 }] },
+    }
+    const { routine, dropped } = parseRoutine(raw)
+    expect(dropped).toEqual([])
+    expect(routine.mon).toEqual({ isMulti: true, name: 'Arms day', plans: ARMS.exercises })
+    expect(routine.tue).toEqual({ plans: [{ exercise: 'dips', goal: 100 }] })
+    expect(routineToFile(routine)).toEqual(raw)
+    // A list of one stays a list, and a plan's own fields stay with it.
+    const kept = { thu: { exercises: [{ exercise: 'plank', goal: 60, unit: 's' }] }, fri: { exercise: 'dips', goal: 100, note: 'slow' } }
+    expect(routineToFile(parseRoutine(kept).routine)).toEqual(kept)
+    expect(parseRoutine({ sat: { exercises: [{ exercise: ' dips ', goal: 10 }] } }).routine.sat?.plans[0]?.exercise).toBe('dips')
+  })
+
+  test('the routine helpers work across single and multi days', () => {
+    const routine = asRoutine({ mon: ARMS, tue: { exercise: 'dips', goal: 80 } })
+    expect(exerciseGoals(routine)).toEqual({ dips: 100, pushups: 50, plank: 180 })
+    expect(describeRoutine(routine)).toBe('100 dips / 50 pushups / 180s plank / 80 dips')
+    const halved = scale(routine, 0.5)
+    expect(halved.mon).toEqual({ isMulti: true, name: 'Arms day', plans: [{ exercise: 'dips', goal: 50 }, { exercise: 'pushups', goal: 25 }, { exercise: 'plank', goal: 90, unit: 's' }] })
+    // A goal left at its prefill keeps the days that differ; a typed one sets the exercise everywhere.
+    const custom = customRoutine(routine, { dips: '100', pushups: '60', plank: '180' })
+    expect(custom?.mon?.plans.map(plan => plan.goal)).toEqual([100, 60, 180])
+    expect(custom?.tue?.plans[0]?.goal).toBe(80)
+    expect(moveGoal(routine, 'pushups', 50, 55).mon?.plans[1]?.goal).toBe(55)
+    expect(canProgress(routine, 'dips')).toBe(false)
+    expect(pickSwap(routine, 'dips')?.exercise).toBe('pushups')
+  })
+
+  test('bad, repeated and extra entries are left out, each named', () => {
+    const { routine, dropped } = parseRoutine({
+      mon: {
+        name: 'Big',
+        exercises: [
+          { exercise: 'dips', goal: 100 },
+          { goal: 10 },
+          { exercise: 'plank', goal: 0 },
+          { exercise: 'DIPS', goal: 50 },
+          ...['a', 'b', 'c', 'd', 'e'].map(exercise => ({ exercise, goal: 1 })),
+          'junk',
+        ],
+      },
+      tue: { exercises: [] },
+      wed: { exercises: [{ exercise: 'x', goal: -5 }] },
+      thu: { exercises: 'dips' },
+    })
+    expect(routine.mon?.plans.map(plan => plan.exercise)).toEqual(['dips', 'a', 'b', 'c', 'd'])
+    // An empty list, or none left, is no plan.
+    expect([routine.tue, routine.wed, routine.thu]).toEqual([undefined, undefined, undefined])
+    expect(dropped).toEqual([
+      'mon #2 (no name)',
+      'mon plank (goal must be above 0)',
+      'mon DIPS (listed twice)',
+      'mon e (over 5 exercises)',
+      'mon #10 (no name)',
+      'wed x (goal must be above 0)',
+      'thu (exercises is not a list)',
+    ])
+  })
+
+  test('one toast names what the routine left out, and the mod carries on', async ($, on) => {
+    const { toasts } = multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: { name: 'Arms day', exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'Dips', goal: 5 }, { exercise: 'plank' }] } })]]))
+    await start($)
+    await fit($, '')
+    expect((await fit($, '10')).text).toContain('10/100 dips')
+    const warnings = toasts.filter(t => t.startsWith('routine.json'))
+    expect(warnings).toEqual(['routine.json: left out mon Dips (listed twice), mon plank (goal must be above 0).'])
+  })
+
+  test('a day log is a plain count on a single day and a count per exercise on a multi day', () => {
+    expect(parseDayLog('40\n', ['pushups'])).toEqual([40])
+    expect(parseDayLog(undefined, ['dips', 'plank'])).toEqual([0, 0])
+    expect(parseDayLog('30\n', ['dips', 'plank'])).toEqual([30, 0])
+    expect(parseDayLog('{"dips":40,"plank":20}\n', ['dips', 'pushups', 'plank'])).toEqual([40, 0, 20])
+    expect(parseDayLog('{"dips":40,"plank":20}\n', ['plank'])).toEqual([20])
+    expect(parseDayLog('{"dips":40}\n', ['squats'])).toEqual([40])
+    expect(parseDayLog('{"dips', ['dips'])).toEqual([0])
+    expect(formatDayLog([{ exercise: 'pushups', count: 40 }], false)).toBe('40\n')
+    expect(formatDayLog([{ exercise: 'dips', count: 40 }, { exercise: 'pushups', count: 20 }, { exercise: 'plank', count: 0 }], true))
+      .toBe('{"dips":40,"pushups":20,"plank":0}\n')
+  })
+
+  test('a plain count on a day that is now multi counts for its first exercise', async ($, on) => {
+    multiWorld(on, armsMonday([[TODAY_LOG, '30\n']]))
+    await start($)
+    const text = (await fit($, '')).text
+    expect(text).toContain('🏋 Arms day')
+    expect(text).toContain('30/100 dips')
+    expect(text).toContain('0/50 pushups')
+    expect(text).toContain('0/180s plank')
+  })
+
+  test('a + press logs to its row, and a bare /fit follows the last log', async ($, on) => {
+    const { files, toasts } = multiWorld(on, armsMonday())
+    await start($)
+    // Nothing logged yet: the first exercise.
+    expect((await fit($, '20')).text).toContain('20/100 dips · 80 to go')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":20,"pushups":0,"plank":0}\n')
+    expect(dayState(files).last).toBe('dips')
+
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    await ui.press({ key: 'pushups+5' })
+    expect(files.get(TODAY_LOG)).toBe('{"dips":20,"pushups":5,"plank":0}\n')
+    expect(dayState(files).last).toBe('pushups')
+    await ui.unmount()
+
+    toasts.length = 0
+    expect((await fit($, '10')).text).toContain('15/50 pushups · 35 to go')
+    expect(toasts.some(t => t.startsWith('💪 +10 pushups.') && t.endsWith('35 to go.'))).toBe(true)
+    // Past the goal still counts.
+    expect((await fit($, '40')).text).toContain('55/50 pushups · done')
+    // A lower count names its exercise too.
+    await fit($, 'set 30')
+    expect(toasts).toContain('pushups back to 30. 20 to go.')
+  })
+
+  test('a half-written multi log is never written over', async ($, on) => {
+    const { files, toasts } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pus']]))
+    await start($)
+    await fit($, '10')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":40,"pus')
+    expect(toasts).toContain("Couldn't read today's log just now. Nothing logged; try again.")
+  })
+
+  test('a press for an exercise no longer on the plan logs nothing', async ($, on) => {
+    const { files, toasts } = multiWorld(on, armsMonday())
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    files.set(ROUTINE, JSON.stringify({ mon: { name: 'Arms day', exercises: ARMS.exercises.slice(0, 2) } }))
+    await ui.press({ key: 'plank+20' })
+    await ui.unmount()
+    expect(toasts).toContain("plank isn't on today's plan any more.")
+    expect(files.has(TODAY_LOG)).toBe(false)
+  })
+
+  test('each log toasts its exercise and what is left of it', async ($, on) => {
+    const { toasts } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":90,"pushups":50,"plank":0}\n']]))
+    await start($)
+    await fit($, '10')
+    expect(toasts).toContain('✅ dips done: 100/100. Still to go: 180s plank.')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    await ui.press({ key: 'plank+20' })
+    expect(toasts.some(t => t.startsWith('💪 +20s plank.') && t.endsWith('160s to go.'))).toBe(true)
+    await ui.unmount()
+    await fit($, 'set 180')
+    expect(toasts.some(t => t.startsWith('✅ Done. 180/180s plank.'))).toBe(true)
+  })
+
+  test('the band: a status row, then a row per exercise with buttons from its own goal', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([
+      [TODAY_LOG, '{"dips":100,"pushups":10,"plank":0}\n'],
+      // Sunday, a day with no plan, trained: the streak runs into today.
+      [`${LOG}/2026-10-04`, '10\n'],
+    ]))
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    expect(await ui.find({ type: 'Text', text: /^🏋 Arms day {2}🔥2d$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✅ ▓{10} 100\/100 dips/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /10\/50 pushups/ })).toBeDefined()
+    // A finished exercise has no buttons; the others step from their own goals.
+    for (const key of ['dips+5', 'dips+10', 'dips+20', 'add5', 'add10']) expect(await ui.find({ key })).toBeUndefined()
+    for (const key of ['pushups+3', 'pushups+5', 'pushups+10', 'plank+5', 'plank+15', 'plank+20']) expect(await ui.find({ key })).toBeDefined()
+    expect((await ui.find({ key: 'plank+20' }))?.props.label).toBe('+20s')
+    await ui.press({ key: 'plank+20' })
+    expect(files.get(TODAY_LOG)).toBe('{"dips":100,"pushups":10,"plank":20}\n')
+    await ui.unmount()
+  })
+
+  test('the band stops at six rows: a status row and five exercises', async ($, on) => {
+    const seven = ['dips', 'pushups', 'squats', 'lunges', 'burpees', 'situps', 'plank'].map(exercise => ({ exercise, goal: 50 }))
+    multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: { name: 'Full body', exercises: seven } })]]))
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    expect(await ui.find({ type: 'Text', text: /^🏋 Full body/ })).toBeDefined()
+    for (const { exercise } of seven.slice(0, 5)) expect(await ui.find({ key: `row-${exercise}` })).toBeDefined()
+    for (const { exercise } of seven.slice(5)) expect(await ui.find({ key: `row-${exercise}` })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('the streak, the scoreboard and its grids count a multi date once', async ($, on) => {
+    multiWorld(on, armsDaily([
+      [`${LOG}/2026-10-04`, '{"dips":100,"pushups":50,"plank":180}\n'],
+      [`${LOG}/2026-10-03`, '{"dips":10}\n'],
+    ]))
+    await start($)
+    expect((await fit($, '')).text).toContain('🔥2d')
+    await fit($, 'streak')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 70 } })
+    expect(await ui.find({ type: 'Text', text: /2-day streak/ })).toBeDefined()
+    // Totals and goals count each exercise; days trained count dates.
+    expect(await ui.find({ type: 'Text', text: /160 reps · 2 days trained · 3 goals hit/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '180s' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a multi date is hit only when every exercise hit, and counts once', () => {
+    const arms = (date: string, dips: number, plank: number) => [logged(date, dips, 'dips', 100), logged(date, plank, 'plank', 60, 's')]
+    // An empty today forgives; yesterday counts once, not once per exercise.
+    expect(streak([...arms('2026-10-04', 100, 0), ...arms('2026-10-05', 0, 0)])).toBe(1)
+    expect(bestStreak([...arms('2026-10-01', 10, 0), ...arms('2026-10-02', 0, 5), ...arms('2026-10-04', 5, 5)])).toBe(2)
+    const heat = (days: ReturnType<typeof arms>) => words(heatCells(days).cells)[1]
+    expect(heat(arms('2026-10-04', 100, 60))).toBe(0xc8a86b)
+    expect(heat(arms('2026-10-04', 100, 30))).toBe(0x6b5d3f)
+    // Sunday the 4th tops this week's column; Monday below it is today.
+    const year = (ledger: ReturnType<typeof arms>) => words(yearCells(ledger, exerciseColors(ledger), MONDAY_9AM, 1).cells)[1]
+    expect(year(arms('2026-10-04', 100, 60))).toBe(GOLD)
+    expect(year(arms('2026-10-04', 100, 30))).toBe(faded(GOLD))
+    // An untouched exercise is no session of it.
+    expect(exerciseTotals(arms('2026-10-04', 100, 0)).map(row => row.exercise)).toEqual(['dips'])
+  })
+
+  test('strict holds no prompt on a multi day, and runs no schedule for it', { options: { strict: true } }, async ($, on) => {
+    multiWorld(on, armsMonday())
+    await start($)
+    expect((await send($)).drop).toBeUndefined()
+    expect((await send($)).drop).toBeUndefined()
+    expect((await fit($, '')).text).not.toContain('due')
+  })
+
+  test('swap, goal, window and snooze say they do not work on a multi day yet', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday())
+    await start($)
+    for (const args of ['swap', 'swap pushups', 'goal 60', 'window 3', 'window 1240', 'snooze']) {
+      expect((await fit($, args)).text).toContain(NOT_YET)
+    }
+    expect(files.has(`${TODAY_LOG}.swap`)).toBe(false)
+  })
+
+  test('a swap from a single day to a multi day says it does not work yet', async ($, on) => {
+    multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: { exercise: 'pushups', goal: 100 }, tue: ARMS })]]))
+    await start($)
+    expect((await fit($, 'swap arms day')).text).toContain(NOT_YET)
+    // An exercise of a multi day is still a single day's swap.
+    expect((await fit($, 'swap plank')).text).toContain('0/180s plank')
+  })
+
+  test('progressive goals leave a multi day alone', { options: { progress: true } }, async ($, on) => {
+    const { files, toasts } = multiWorld(on, armsDaily([[`${LOG}/2026-10-04`, '{"dips":100,"pushups":50,"plank":180}\n']]))
+    const before = files.get(ROUTINE)
+    await start($)
+    await fit($, '100')
+    expect(files.get(ROUTINE)).toBe(before)
+    expect(toasts.some(t => t.includes('up to') || t.includes('Next dips day'))).toBe(false)
+  })
+
+  test('a single day moves alone: a multi day neither moves nor counts as its session', { options: { progress: true } }, async ($, on) => {
+    // Thursday's single 100 pushups were hit; Sunday's arms day pushups after it (a short 10) are no session of it.
+    const typo = { name: 'Legs', exercises: [{ exercise: 'squats', goal: 100 }, { exercise: 'lunges', goal: 0 }] }
+    const { files } = multiWorld(on, new Map([
+      [ROUTINE, JSON.stringify({ mon: { exercise: 'pushups', goal: 100 }, thu: { exercise: 'pushups', goal: 100 }, sun: { ...ARMS, exercises: [{ exercise: 'pushups', goal: 100 }] }, wed: typo })],
+      [`${LOG}/2026-10-01`, '100\n'],
+      [`${LOG}/2026-10-04`, '{"pushups":10}\n'],
+    ]))
+    await start($)
+    const routine = JSON.parse(files.get(ROUTINE) ?? '{}')
+    expect([routine.mon.goal, routine.thu.goal]).toEqual([105, 105])
+    expect(routine.sun.exercises[0].goal).toBe(100)
+    // An entry the reader left out stays in the file for the person to fix.
+    expect(routine.wed).toEqual(typo)
+  })
+
+  test('a swap file holds a multi day too', async ($, on) => {
+    multiWorld(on, new Map([[`${TODAY_LOG}.swap`, `${JSON.stringify(ARMS)}\n`]]))
+    await start($)
+    expect((await fit($, '')).text).toContain('🏋 Arms day')
+  })
+
+  test('/fit reset puts every exercise back to 0', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pushups":20,"plank":60}\n']]))
+    await start($)
+    expect((await fit($, 'reset')).text).toContain('0/50 pushups')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":0,"pushups":0,"plank":0}\n')
+  })
+
+  test('/fit rest names what was logged on a multi day', async ($, on) => {
+    multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pushups":0,"plank":60}\n']]))
+    await start($)
+    expect((await fit($, 'rest')).text).toContain("You've logged 40 dips, 60s plank today")
+  })
+
+  test('/fit program keeps a routine with multi days, and a new one freezes them as they were', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[`${LOG}/2026-09-28`, '{"dips":100}\n']]))
+    await start($)
+    const walk = async (program?: string) => {
+      await fit($, 'program')
+      const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-onboard' })
+      await ui.press({ key: 'next' })
+      if (program !== undefined) await ui.press({ key: program })
+      await ui.press({ key: 'next' })
+      await ui.press({ key: 'finish' })
+      await ui.unmount()
+    }
+    const kept = files.get(ROUTINE)
+    await walk()
+    expect(files.get(ROUTINE)).toBe(kept)
+    // program-0 is "Keep my current routine"; program-1 the first preset.
+    await walk('program-1')
+    expect(files.get(`${LOG}/2026-09-28.swap`)).toBe(`${JSON.stringify(ARMS)}\n`)
+    expect(JSON.parse(files.get(ROUTINE) ?? '{}').mon).toEqual({ exercise: 'pushups', goal: 100 })
+  })
+
+  test('/fit help describes multi days', async ($, on) => {
+    multiWorld(on, new Map())
+    await start($)
+    await fit($, 'help')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-help' })
+    expect(await ui.find({ type: 'Markdown', text: /### Multi-exercise days[\s\S]*"exercises"[\s\S]*a row per exercise/ })).toBeDefined()
+    await ui.unmount()
   })
 })
