@@ -312,10 +312,8 @@ const refreshLedger = async ($: Engine) => {
 
 type Schedule = { from: number; ms: number; base: number }
 
-// The day's pace, kept in `<date>.day` beside its count so every session reads
-// the same one: when the day started, a `/fit window`, a breather's end, and
-// the `/fit snooze`s taken (how many today, and the due point the last put off),
-// and `last`: the exercise logged last, which a bare `/fit 20` logs to.
+// The day's pace in `<date>.day`, shared by every session: its start, a `/fit window`, a breather's end,
+// the `/fit snooze`s taken and the point put off, and `last`, the exercise a bare `/fit 20` logs to.
 type DayState = { start?: number; window?: Schedule; breather?: number; laters?: number; putOff?: number; last?: string }
 
 const dayPath = async ($: Engine, date: string) => `${(await files($)).log}/${date}.day`
@@ -665,9 +663,8 @@ const syncFromDisk = async ($: Engine, isForced = false) => {
 // The set the last nudge suggested, for the spinner. Replaced whole, never changed field by field.
 let nudged = { reps: 0, exercise: '' }
 
-// Easy mode: a suggestion once a turn runs long, sized to the set that's due.
-// On pace or in a breather there's nothing owed, so nothing to suggest. A multi
-// day suggests its focus exercise, or the first one still short.
+// Easy mode: once a turn runs long, a suggestion sized to the set due; none on pace or in a
+// breather. A multi day suggests its focus exercise, or the first one still short.
 const nudge = async ($: Engine) => {
   const p = await refreshPace($)
   const t = await read($, today)
@@ -1183,7 +1180,7 @@ export const register: Register = (on, options) => {
     const paced = paceable(t)
 
     // A multi day: a status row, then a row per exercise with its own bar and
-    // buttons sized from its own goal. Five exercises at most: six rows.
+    // buttons sized from its own goal.
     if (paced === undefined) {
       const rows = t.exercises.map(entry => {
         const steps = isFinished(entry) ? [] : repSteps(setSizeOf(t, entry))

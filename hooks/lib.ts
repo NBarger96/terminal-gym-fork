@@ -37,9 +37,8 @@ export const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof
 // A name from a file as it is shown: no C0 or C1 control characters, so no terminal escape or newline.
 const shown = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 
-// A single day's plan reads as it always has: any named exercise with a numeric
-// goal, 0 included (a frozen day with no plan is `{ exercise: "reps", goal: 0 }`).
-// Fields of its own beyond these stay, so a rewrite keeps them.
+// A single day's plan reads as it always has: any named exercise with a numeric goal, 0
+// included (a frozen no-plan day is `reps`/0). Its other fields stay, so a rewrite keeps them.
 const asPlan = (raw: unknown): Plan | undefined => {
   if (!isRecord(raw) || typeof raw.exercise !== 'string' || shown(raw.exercise).trim() === '') return undefined
   if (typeof raw.goal !== 'number' || !Number.isFinite(raw.goal)) return undefined
@@ -96,10 +95,6 @@ export const parseRoutine = (raw: unknown): { routine: Routine; dropped: string[
 // The one toast for a routine with entries left out.
 export const droppedText = (dropped: readonly string[]) => `routine.json: left out ${dropped.join(', ')}.`
 
-// A day's log file: a plain count on a single day, a JSON object of counts per
-// exercise on a multi day. Either reads on either: a plain number on a multi
-// day counts for its first exercise; an object on a single day gives its
-// exercise's count, or the first count when it names another.
 // The counts of a multi day's log, or undefined when it is not a whole JSON
 // object: another session may be mid-write.
 const countsObject = (trimmed: string): Record<string, unknown> | undefined => {
@@ -115,6 +110,8 @@ const countsObject = (trimmed: string): Record<string, unknown> | undefined => {
 export const isDamagedLog = (text: string | undefined) =>
   text !== undefined && text.trim().startsWith('{') && countsObject(text.trim()) === undefined
 
+// A day's log: a plain count on a single day, counts per exercise on a multi day. A plain number on a
+// multi day counts for its first exercise; an object on a single day gives its exercise's count, else the first.
 export const parseDayLog = (text: string | undefined, exercises: readonly string[]): number[] => {
   const zeros = exercises.map(() => 0)
   if (text === undefined) return zeros
@@ -302,9 +299,8 @@ export const isDone = (day: Day) => !day.isSkipped && day.goal > 0 && day.count 
 // Any reps keep a streak alive; only a day with none, or a rest day, breaks it.
 const keepsStreak = (day: Day) => !day.isSkipped && day.count > 0
 
-// History and the ledger hold one entry per exercise, so a multi day's date
-// appears once per exercise. Anything that counts days groups them first.
-// Input is in date order; each group is one date's entries.
+// History and the ledger hold one entry per exercise, so anything that counts days groups
+// a date's entries first. Input is in date order; each group is one date's entries.
 export const byDate = (days: readonly Day[]): Day[][] => {
   const groups: Day[][] = []
   for (const day of days) {

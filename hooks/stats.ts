@@ -1,9 +1,8 @@
 import type { Day } from '../types'
 import { DEFAULT, EMPTY, GRID_COLORS, byDate, dayKey, encodeCells, entriesByDate, isDateDone, isDone, keepsDateStreak, lastDays, noonOf } from './lib'
 
-// The scoreboard's numbers and charts, worked out from the ledger: every day
-// with reps, oldest first, one entry per exercise (a multi day's exercises
-// share a date, and one of them may have none). Pure, so a drawing only has to read them.
+// The scoreboard's numbers and charts from the ledger: every day with reps, oldest first, one entry
+// per exercise (a multi day's share a date, and one may have none). Pure, so a drawing only reads them.
 
 const DAY_MS = 86_400_000
 // Today on the year grid: the band's green, which no exercise wears.

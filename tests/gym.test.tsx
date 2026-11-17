@@ -2347,7 +2347,7 @@ describe('multi days', () => {
     }
     const { stored } = world(on, files, { slashes: true, now: MONDAY_9AM + 86_400_000, store: { streakRun: { asOf: '2026-09-08', older: 12 } } })
     await start($)
-    // 27 days in the window, then the 8th (pushups only, no dips) joins the cached 12.
+    // The window's days, then the day that left it (pushups only, no dips) on top of the cached run.
     expect((await fit($, '')).text).toContain('🔥40d')
     expect(stored.get('streakRun')).toEqual({ asOf: '2026-09-09', older: 13 })
   })
@@ -2408,7 +2408,7 @@ describe('multi days', () => {
     await fit($, 'program')
     const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...ONBOARD })
     await ui.press({ key: 'next' })
-    // program-0 keeps the routine, 1 to 3 are presets, 4 is Custom goals.
+    // The last program button is Custom goals, after Keep and the presets.
     await ui.press({ key: 'program-4' })
     await ui.input({ key: 'goal-dips', text: '120' })
     await ui.press({ key: 'next' })
@@ -2510,7 +2510,7 @@ describe('multi days', () => {
       await ui.unmount()
       return row?.children[0] as { type: string; props?: Record<string, unknown> } | undefined
     }
-    // Plank's buttons, +5s +15s +20s, take 25 columns: the line gets what is left.
+    // The line gets the columns plank's buttons leave.
     expect(buttonsWidth(['+5s', '+15s', '+20s'])).toBe(25)
     expect(await textBox(30)).toMatchObject({ type: 'Box', props: { width: 5 } })
     const wide = await textBox(100)

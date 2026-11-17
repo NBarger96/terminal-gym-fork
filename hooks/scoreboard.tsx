@@ -206,9 +206,8 @@ export const drawScoreboard = (
     </Box>
   )
 
-  // One row an exercise: date, its progress bar in the band's colors, then the
-  // count. A multi day's later rows leave the date blank. Counts padded to one
-  // width so the exercise names line up.
+  // One row an exercise: date (blank on a multi day's later rows), its bar in the band's
+  // colors, then the count, padded to one width so the exercise names line up.
   const dates = byDate(days).slice(-7)
   const week = dates.flat()
   const counts = week.map(day => (day.isSkipped ? 'rest' : `${day.count}/${day.goal}`))
