@@ -47,6 +47,10 @@ import {
   parseRoutine,
   parseRoutineDay,
   pickSwap,
+  swapText,
+  swappedLog,
+  goalPick,
+  couldBeText,
   progressColor,
   repSteps,
   routineToFile,
@@ -170,6 +174,12 @@ const readSwap = async ($: Engine, logDir: string, date: string): Promise<Routin
 const writeSwap = async ($: Engine, date: string, day: RoutineDay) =>
   $.fs.write(`${(await files($)).log}/${date}.swap`, `${JSON.stringify(dayToFile(day))}\n`)
 
+// A date's day as its swap file or the routine holds it: what `/fit swap` and `/fit goal` change.
+const dayOf = async ($: Engine, date: string): Promise<RoutineDay> => {
+  const { routine, log: logDir } = await files($)
+  return (await readSwap($, logDir, date)) ?? (await loadRoutine($, routine))[weekdayKey(noonOf(date))] ?? single(NO_PLAN)
+}
+
 // `/fit rest` leaves `<date>.skip`; `/fit rest off` writes "off" into it to undo.
 const readRest = async ($: Engine, path: string) =>
   (await $.fs.exists(path)) && (await $.fs.read(path)).trim() !== 'off'
@@ -208,11 +218,10 @@ const progress = async ($: Engine, date: string) => {
 
 // Today from disk, with its pace file: refreshPace needs both, and reads the file once.
 const readToday = async ($: Engine): Promise<{ t: Today; state: DayState }> => {
-  const { routine, log: logDir } = await files($)
+  const { log: logDir } = await files($)
   const date = dayKey(await $.clock.now())
   await progress($, date)
-  const day =
-    (await readSwap($, logDir, date)) ?? (await loadRoutine($, routine))[weekdayKey(await $.clock.now())]
+  const day = await dayOf($, date)
   const plans = plansOf(day)
   const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
   const state = await readDayState($, date)
@@ -825,7 +834,7 @@ const boot = async ($: Engine) => {
   await $.command.register({
     name: 'fit',
     description: "Log reps toward today's goal",
-    argumentHint: '[n [exercise] | set n [exercise] | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
+    argumentHint: '[n [exercise] | set n [exercise] | snooze [min] | goal n [exercise] | window hours | swap [day | exercise | out in] | streak | strict | easy | help]',
     immediate: true,
   })
 }
@@ -875,7 +884,7 @@ export const register: Register = (on, options) => {
         if (cmd.typedName !== undefined) {
           const names = before.exercises.map(e => e.exercise)
           const match = matchExercise(cmd.typedName, names)
-          if (match.kind === 'many') return { text: `"${cmd.typedName}" could be ${match.names.join(' or ')}, so nothing logged. Type more of the name.` }
+          if (match.kind === 'many') return { text: couldBeText(cmd.typedName, match.names, 'nothing logged') }
           if (match.kind === 'none') return { text: `No ${cmd.typedName} today, so nothing logged. Today: ${names.join(', ')}.` }
           exercise = names[match.index]
         }
@@ -917,37 +926,35 @@ export const register: Register = (on, options) => {
       }
       case 'swap': {
         const before = await refreshToday($)
-        const was = paceable(before)
-        if (was === undefined) return { text: NOT_ON_MULTI('/fit swap') }
-        const { routine: routinePath } = await files($)
-        const routine = await loadRoutine($, routinePath)
-        const names = [...new Set(allPlans(routine).map(p => p.exercise))]
-        if (names.length === 0) return { text: 'Your program has no exercises. /fit program to pick one.' }
-        const plan = pickSwap(routine, was.exercise, cmd.exercise)
-        if (plan === undefined) {
-          const isMultiName = Object.values(routine).some(day => isMultiDay(day) && day.name?.toLowerCase() === cmd.exercise)
-          if (isMultiName) return { text: NOT_ON_MULTI(`/fit swap ${cmd.exercise ?? ''}`.trim()) }
-          return { text: `No ${cmd.exercise} in your program. Pick one of: ${names.join(', ')}.` }
-        }
-        if (plan.exercise === was.exercise) return { text: `Already on ${plan.exercise} today.` }
-        await writeSwap($, before.date, single(plan))
+        const { routine: routinePath, log: logDir } = await files($)
+        const pick = pickSwap(await loadRoutine($, routinePath), await dayOf($, before.date), cmd.typedName)
+        if (pick.kind === 'refuse') return { text: pick.text }
+        if (pick.kind === 'same') return { text: `Already on ${pick.name} today.` }
+        // The log moves with the plan, so it is read whole first: another session's write still landing stays.
+        const logPath = `${logDir}/${before.date}`
+        const text = await readLog($, logPath)
+        if (isDamagedLog(text)) return { text: "Couldn't read today's log, so nothing swapped. If it stays this way, /fit reset starts today over at 0." }
+        const moved = pick.kind === 'moved' ? pick.moved : undefined
+        await writeSwap($, before.date, pick.day)
+        const log = swappedLog(before.exercises, pick.day, text, moved)
+        if (text !== undefined && log !== text) await $.fs.write(logPath, log)
+        if (moved !== undefined && before.last === moved.from) await writeDayState($, before.date, state => ({ ...state, last: moved.to }))
         await refreshHistory($)
-        const amount = was.unit === '' ? `${was.count} reps` : `${was.count}${was.unit}`
-        const carried = was.count > 0 ? ` Your ${amount} carry over.` : ''
         const swapped = await refreshToday($)
         await refreshPace($)
-        return { text: `Swapped to ${plan.exercise} today.${carried} ${todayText(swapped)}` }
+        return { text: `${swapText(pick, before, swapped)} ${todayText(swapped)}` }
       }
       case 'goal': {
         // Today's plan with a new goal, in the same file `/fit swap` writes.
         const before = await refreshToday($)
         if (before.isRest) return { text: "Today's a rest day. /fit rest off to train." }
-        const was = paceable(before)
-        if (was === undefined) return { text: NOT_ON_MULTI('/fit goal') }
-        await writeSwap($, before.date, single({ exercise: was.exercise, goal: cmd.n, ...(was.unit === '' ? {} : { unit: was.unit }) }))
+        const pick = goalPick(await dayOf($, before.date), cmd.n, cmd.typedName)
+        if (pick.kind === 'refuse') return { text: pick.text }
+        await writeSwap($, before.date, pick.day)
         await refreshHistory($)
         const after = await refreshToday($)
-        return { text: `Today's goal is ${cmd.n}${was.unit} ${was.exercise}. ${todayText(after)}${paceText(await reschedule($, before.date), isStrict, await $.clock.now())}` }
+        const { exercise, unit = '' } = pick.plan
+        return { text: `Today's goal is ${cmd.n}${unit} ${exercise}. ${todayText(after)}${paceText(await reschedule($, before.date), isStrict, await $.clock.now())}` }
       }
       case 'window': {
         const t = await refreshToday($)

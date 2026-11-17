@@ -89,7 +89,9 @@ The day counts once for your streak when any exercise has reps, and as hit on th
 
 An entry with no name, a goal of 0 or less, a name already listed (in any case), or past the fifth is left out, and one toast names every entry left out. A day whose list ends up empty has no plan.
 
-Not on a multi day yet: strict mode holds no prompt and runs no set schedule, progressive goals leave it alone, and `/fit swap`, `/fit goal`, `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
+`/fit swap dips situps` puts situps in place of dips for today only, with situps' goal from your program, and dips' count carries over to situps. `/fit swap arms day` makes today your program's day named Arms day; exercises on both days keep their counts. Names match as `/fit 20 dips` does: any case, or the start of a name. When a word names both a day and an exercise, the day wins and the reply says so. On a multi day, `/fit swap dips` alone asks for the second name; a bare `/fit swap` moves to the next different day in your program. `/fit goal 60 dips` changes dips' goal for today only, and `routine.json` stays as it is. On a multi day a bare `/fit goal 60` changes nothing and asks which exercise.
+
+Not on a multi day yet: strict mode holds no prompt and runs no set schedule, progressive goals leave it alone, and `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
 
 ## The scoreboard
 
@@ -101,7 +103,7 @@ Not on a multi day yet: strict mode holds no prompt and runs no set schedule, pr
 
 Each exercise keeps one color. Your first three logged exercises get gold, blue and pink. Later exercises share grey, because a fourth color can't stay distinct under color blindness, and their labels tell them apart. A bright bar or square means you hit the goal. A dim one means you fell short. On a multi day each exercise's part of the bar is bright or dim on its own, and its square on the year grid is bright only when every exercise hit.
 
-A single day's log is one count for one exercise, and a multi day's is a count per exercise, stacked in one bar. If you `/fit swap` during a day, that day's reps all count for the exercise it ended on. Timed exercises count in the chart's bars alongside reps, and the headline total counts reps only.
+A single day's log is one count for one exercise, and a multi day's is a count per exercise, stacked in one bar. If you `/fit swap` a single day, that day's reps all count for the exercise it ended on; a multi day's swapped-out exercise hands its count to the one put in. Timed exercises count in the chart's bars alongside reps, and the headline total counts reps only.
 
 ## Several sessions at once
 
@@ -116,11 +118,13 @@ Every Claude Code session reads the same log in `~/.claude/fitness`, so a set yo
 | `/fit 20 dips` | log 20 to the exercise named (any case, or the start of its name); a name not on today's plan logs nothing |
 | `/fit set 80 [exercise]` | fix today's count (on a multi day, the exercise named, or the one logged last) |
 | `/fit reset` | today back to 0 |
-| `/fit goal 60` | change today's goal (your routine stays as it is) |
+| `/fit goal 60 [exercise]` | change today's goal (your routine stays as it is); on a multi day, name the exercise |
 | `/fit window 3` | spread what's left of today over the next 3 hours (`/fit window off` to undo) |
 | `/fit window 1240` | spread what's left of today between now and 12:40 (24-hour clock, `12:40` works too) |
 | `/fit snooze 30` | put the due set off 30 minutes (up to 60): prompts go through, the set stays owed. Once per set, twice a day |
-| `/fit swap [exercise]` | switch today's exercise: the next in your program, or the one you name, with that exercise's goal |
+| `/fit swap [exercise]` | switch today's exercise: the next day in your program, or the exercise you name, with that exercise's goal |
+| `/fit swap <day name>` | make today your program's day of that name |
+| `/fit swap <out> <in>` | on a multi day, put one exercise in place of another for today; its count carries over |
 | `/fit rest` | rest day: no sets due, breaks your streak. Only before you've logged reps that day |
 | `/fit rest off` | undo today's rest day (or press **Train today** on the band) |
 | `/fit streak` | scoreboard: all-time totals, chart, the past year and the last week (run again or press Esc to close) |
