@@ -484,7 +484,7 @@ const reschedule = async ($: Engine, date: string): Promise<Pace | null> => {
 
 // A swap between a multi day, paced in percent, and a single day, paced in its own reps, changes the
 // scale a `/fit window`'s `base` is in. So the window keeps its end, and what is left on the new
-// scale is spread from now to that end: still what is left, over the hours named.
+// scale is spread from now to that end: what is left, over the hours named.
 const rescaleWindow = async ($: Engine, t: Today) => {
   const { window } = await readDayState($, t.date)
   if (window === undefined) return
@@ -621,7 +621,8 @@ const withStreak = (t: Today, days: readonly Day[], older = 0) => todayText(t, '
 // The exercise a bare `/fit 20` logs to, a nudge suggests and the spinner names.
 const focusOf = (t: Today) => t.exercises[logTarget(t.exercises, t.last)] ?? t.exercises[0] ?? { ...NO_PLAN, unit: '', count: 0 }
 
-// A single day's one exercise, for the commands a multi day still refuses. Undefined on a multi day.
+// A single day's one exercise, for the band's single-day row and the replies that name a single
+// day's reps. Undefined on a multi day.
 const paceable = (t: Today) => (t.isMulti ? undefined : t.exercises[0])
 
 // Read at each use: the set-size option is set when the module registers.
@@ -659,7 +660,7 @@ const thenToday = (t: Today, paceLine = '') => `${t.isMulti ? '\n' : ' '}${today
 const setSizeOf = (t: Today, e: TodayExercise) => setSizeFor(e.goal, t.isMulti ? 0 : paceConfig.setSize)
 
 // What earns a whole breather on a multi day: the exercise row's smallest + button, or the set
-// suggested for it when that is smaller, so the suggested set always earns the whole breather.
+// suggested for it when that is smaller, so the suggested set earns the whole breather.
 const multiSmallest = (t: Today, e: TodayExercise) => {
   const button = repSteps(setSizeOf(t, e))[0] ?? setSizeOf(t, e)
   const suggested = setIdeas(t.exercises, t.last).find(idea => sameExercise(idea.exercise, e.exercise))?.amount
@@ -795,7 +796,7 @@ const syncFromDisk = async ($: Engine, isForced = false) => {
   return true
 }
 
-// The set the last nudge suggested, for the spinner. Replaced whole, never changed field by field.
+// The set the last nudge suggested, for the spinner. Each nudge replaces it whole.
 let nudged = { reps: 0, exercise: '' }
 
 // Easy mode: once a turn runs long, a suggestion sized to the set due; none on pace or in a
@@ -1094,7 +1095,7 @@ export const register: Register = (on, options) => {
         if (moved !== undefined && before.last === moved.from) await writeDayState($, before.date, state => ({ ...state, last: moved.to }))
         await refreshHistory($)
         const swapped = await refreshToday($)
-        // A change of scale reschedules: a window and a breather sized in the old one no longer fit.
+        // A change of scale reschedules: a window and a breather sized in the old scale don't fit the new one.
         const isRescaled = swapped.isMulti !== before.isMulti
         if (isRescaled) await rescaleWindow($, swapped)
         const p = isRescaled ? await reschedule($, before.date) : await refreshPace($)

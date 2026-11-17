@@ -2270,8 +2270,8 @@ describe('multi days', () => {
 
   describe('strict on a multi day', () => {
     const HOUR = 60 * 60_000
-    const GAP = (8 * HOUR) / 9 // the default window between sets of 10%
-    // The spec's demo day: 100 dips and 180s of plank.
+    const GAP = (8 * HOUR) / 9 // the gap between sets in the default window
+    // The spec's demo day.
     const PAIR = { name: 'arms', exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'plank', goal: 180, unit: 's' }] }
     const pairWorld = (on: On, more: [string, string][] = []) =>
       multiWorld(on, new Map<string, string>([[ROUTINE, JSON.stringify({ mon: PAIR })], ...more]))
@@ -2288,14 +2288,14 @@ describe('multi days', () => {
       expect(paceScale({ isMulti: false, exercises: [{ count: 40, goal: 100 }] }, 0)).toEqual({ goal: 100, count: 40, setSize: 10 })
       expect(paceScale({ isMulti: false, exercises: [{ count: 40, goal: 100 }] }, 15)?.setSize).toBe(15)
       const ideas = (dips: number, plank: number, last?: string) => setIdeas(pair(dips, plank), last).map(e => `${e.amount} ${e.exercise}`)
-      // Each idea alone covers a tenth of the day: on two exercises, two tenths of its goal.
+      // Each idea alone covers a tenth of the day: on n exercises, n tenths of its goal.
       expect(ideas(0, 0)).toEqual(['20 dips', '36 plank'])
       expect(ideas(0, 0, 'plank')).toEqual(['36 plank', '20 dips'])
       expect(dayShare(pair(20, 0))).toBe(10)
       expect(dayShare(pair(0, 36))).toBe(10)
       // A finished exercise is never suggested, and a set is never more than what is left.
       expect(ideas(100, 170, 'dips')).toEqual(['10 plank'])
-      // Three exercises: three tenths of each.
+      // A day of more exercises suggests more tenths of each.
       const trio = setIdeas([{ exercise: 'dips', count: 0, goal: 100 }, { exercise: 'pushups', count: 0, goal: 50 }, { exercise: 'plank', count: 0, goal: 180 }], undefined)
       expect(trio.map(e => e.amount)).toEqual([30, 15, 54])
     })
@@ -2352,7 +2352,7 @@ describe('multi days', () => {
       multiWorld(on, armsMonday([startedAt(MONDAY_9AM - GAP)]))
       await start($)
       expect((await send($)).drop).toContain('Set due: 20% of Arms day, e.g. 30 dips or 15 pushups or 54s plank')
-      // The suggested 30 dips: a tenth of the three-exercise day, and the whole breather.
+      // The suggested dips: a tenth of the day, and the whole breather.
       expect((await fit($, '30')).text).toContain('10% due · rest for 27m')
     })
 
@@ -2360,7 +2360,7 @@ describe('multi days', () => {
       const SHORT = { name: 'short', exercises: [{ exercise: 'squats', goal: 10 }, { exercise: 'dips', goal: 100 }] }
       multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: SHORT })], startedAt(MONDAY_9AM - GAP)]))
       await start($)
-      // Two tenths of 10 squats is 2, under the squats row's smallest button of 3.
+      // The squats' suggested set is under the squats row's smallest button.
       expect((await send($)).drop).toContain('Set due: 20% of short, e.g. 2 squats or 20 dips')
       expect((await fit($, '2 squats')).text).toContain('10% due · rest for 27m')
     })
@@ -2422,7 +2422,7 @@ describe('multi days', () => {
       expect(single).toContain('Swapped to pushups today. 💪')
       expect(single).toContain('0/100 pushups  🏁 first set: 10 to start the day')
       expect(dayState(files).window).toEqual({ from: MONDAY_9AM + HOUR, ms: 2 * HOUR, base: 0 })
-      // And back: the day's share, 25%, over the same end.
+      // And back: the day's share, over the same end.
       const multi = (await fit($, 'swap')).text
       expect(multi).toMatch(/^Swapped to arms today\. Kept: 50 dips\.\n🏋 arms  10% due now/)
       expect(dayState(files).window).toEqual({ from: MONDAY_9AM + HOUR, ms: 2 * HOUR, base: 25 })
@@ -2734,7 +2734,7 @@ describe('multi days', () => {
     await fit($, 'program')
     const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...ONBOARD })
     await ui.press({ key: 'next' })
-    // The last program button is Custom goals, after Keep and the presets.
+    // Custom goals, after Keep and the presets.
     await ui.press({ key: 'program-4' })
     await ui.input({ key: 'goal-dips', text: '120' })
     await ui.press({ key: 'next' })

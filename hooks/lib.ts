@@ -40,7 +40,7 @@ export const normalName = (name: string) => name.trim().replace(/\s+/g, ' ').toL
 // One exercise however it is spelled: `Dips`, `dips` and ` dips ` are the same exercise.
 export const sameExercise = (a: string, b: string) => normalName(a) === normalName(b)
 
-// A single day's plan reads as it always has: any named exercise with a numeric goal, 0
+// A single day's plan: any named exercise with a numeric goal, 0
 // included (a frozen no-plan day is `reps`/0). Its other fields stay, so a rewrite keeps them.
 const asPlan = (raw: unknown): Plan | undefined => {
   if (!isRecord(raw) || typeof raw.exercise !== 'string' || shown(raw.exercise).trim() === '') return undefined
@@ -133,7 +133,8 @@ const countsObject = (trimmed: string): Record<string, unknown> | undefined => {
   }
 }
 
-// A log that started as counts per exercise and doesn't parse: never written over.
+// A log that started as counts per exercise and doesn't parse. A log or a swap leaves it as it is,
+// since another session may be mid-write; only /fit reset writes over it.
 export const isDamagedLog = (text: string | undefined) =>
   text !== undefined && text.trim().startsWith('{') && countsObject(text.trim()) === undefined
 
@@ -949,8 +950,8 @@ type Tally = { count: number; goal: number }
 // What the set schedule paces, in the units its numbers are in.
 export type PaceScale = { goal: number; count: number; setSize: number }
 
-// Capped so extra dips never cover a skipped plank; whole percent so a due share reads
-// cleanly. The nudge keeps a float like 9.999… from flooring a full tenth to 9.
+// Each share is capped at its goal, so reps past the dips' goal add nothing to cover a skipped
+// plank; whole percent so a due share reads cleanly. The nudge keeps a float like 9.999… from flooring a full tenth to 9.
 export const dayShare = (exercises: readonly Tally[]) => {
   if (exercises.length === 0) return 0
   const shares = exercises.reduce((sum, e) => sum + (e.goal > 0 ? Math.min(1, Math.max(0, e.count) / e.goal) : 1), 0)
