@@ -83,6 +83,8 @@ A weekday in `routine.json` can hold a whole session: an optional name and up to
 }
 ```
 
+Or type them in: `/fit program`, then **Custom days**, gives a line per weekday, filled in with its current plan. A line reads `[<name>:] <goal> <exercise>, <goal> <exercise>, …`, with `s` after a goal for seconds: `arms: 100 dips, 100 pushups, 180s plank` makes a multi day named arms with a 3-minute plank, and `30 burpees` a one-exercise day. A line names a multi day when it has a name or more than one exercise. The same rules as the file apply, and a line that breaks one keeps the step open, naming the weekday and what is wrong; nothing is written until every line reads. A unit is `s`, or one your `routine.json` already uses. Emptying a line leaves that weekday with no plan. Only the days you change are written; a line left as it was keeps its day in `routine.json` as written. A retyped day keeps each exercise's other fields and the entries left out of it, except one that would now join the plan (one past the fifth), which goes. Custom days needs a text field, so like Custom goals it isn't offered on mobile.
+
 On that day the band shows a status row (the day's name, its pace and your streak) and one row per exercise, each with its own progress bar and **+** buttons sized from that exercise's goal: the plank's buttons step in seconds, the dips' in reps. A finished exercise shows ✅ and no buttons. A **+** logs to its row. `/fit 20` logs to the exercise you logged last today, in any session, or to the first one when you haven't logged yet. Every reply and toast names the exercise and what is left of it, and logging past an exercise's goal still counts.
 
 The day counts once for your streak when any exercise has reps, and as hit on the grid and the year only when every exercise hit its goal. All-time totals and best days count each exercise on its own.
@@ -124,7 +126,7 @@ Every Claude Code session reads the same log in `~/.claude/fitness`, so a set yo
 | `/fit rest off` | undo today's rest day (or press **Train today** on the band) |
 | `/fit streak` | scoreboard: all-time totals, chart, the past year and the last week (run again or press Esc to close) |
 | `/fit streak 90` | scoreboard on the last 90 days (2 to 365) |
-| `/fit program` | pick your program (the walkthrough), or **Custom goals** to type each exercise's daily goal |
+| `/fit program` | pick your program (the walkthrough), or **Custom goals** to type each exercise's daily goal, or **Custom days** to type each weekday's exercises |
 | `/fit progress` | progressive goals on (`/fit progress off` to stop) |
 | `/fit strict` / `/fit easy` | strict mode on / off |
 | `/fit help` | every command + strict-mode rules (`/fit rules` still works) |
