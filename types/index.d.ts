@@ -45,6 +45,9 @@ export type OnboardPick = {
   // Custom: the routine whose days it keeps, and each exercise's goal as typed.
   base: Record<string, RoutineDay>
   custom: Record<string, string>
+  // Custom days: each weekday's line as typed.
+  days: Record<string, string>
+  // A Next on Custom goals or Custom days found input that does not read.
   isCustomInvalid: boolean
 }
 

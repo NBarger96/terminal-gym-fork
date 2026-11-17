@@ -21,11 +21,13 @@ import {
   setSizeFor,
   stepFor,
   buttonsWidth,
-  canProgress,
   cells,
   cheer,
+  customDays,
   customRoutine,
   dayKey,
+  dayLine,
+  daysOverFile,
   dayToFile,
   droppedText,
   exerciseGoals,
@@ -50,14 +52,15 @@ import {
   parseRoutineDay,
   pickSwap,
   progressColor,
+  progressesAt,
   repSteps,
   routineToFile,
   scale,
   single,
-  singleDays,
   streak,
   typedGoal,
   weekdayKey,
+  WEEK_LINES,
 } from './lib'
 import type { Routine } from './lib'
 import { DEFAULT_RANGE } from './stats'
@@ -110,6 +113,7 @@ const onboardPick = atom({ plugin: 'terminal-gym', key: 'onboardPick' } as const
   hasRoutine: false,
   base: DEFAULT_ROUTINE,
   custom: {},
+  days: {},
   isCustomInvalid: false,
 })
 
@@ -125,14 +129,22 @@ const files = async ($: Engine) => {
 const writeRoutine = ($: Engine, routinePath: string, routine: Routine) =>
   $.fs.write(routinePath, `${JSON.stringify(routineToFile(routine), null, 2)}\n`)
 
-// Sets `routine`'s goals in routine.json and keeps the rest as written (goalsOverFile).
+// Writes what `change` makes of routine.json's object, which keeps the rest as written.
 // A file that is no JSON object any more is left alone: false.
-const writeGoals = async ($: Engine, routinePath: string, routine: Routine) => {
+const writeOverFile = async ($: Engine, routinePath: string, change: (raw: Record<string, unknown>) => Record<string, unknown>) => {
   const raw: unknown = JSON.parse(await $.fs.read(routinePath))
   if (!isRecord(raw)) return false
-  await $.fs.write(routinePath, `${JSON.stringify(goalsOverFile(raw, routine), null, 2)}\n`)
+  await $.fs.write(routinePath, `${JSON.stringify(change(raw), null, 2)}\n`)
   return true
 }
+
+// Sets `routine`'s goals in routine.json (goalsOverFile).
+const writeGoals = ($: Engine, routinePath: string, routine: Routine) =>
+  writeOverFile($, routinePath, raw => goalsOverFile(raw, routine))
+
+// Writes the days of `routine` that differ from `base` into routine.json (daysOverFile).
+const writeDays = ($: Engine, routinePath: string, routine: Routine, base: Routine) =>
+  writeOverFile($, routinePath, raw => daysOverFile(raw, routine, base))
 
 const loadRoutine = async ($: Engine, routinePath: string): Promise<Routine> => {
   if (!(await $.fs.exists(routinePath))) {
@@ -176,10 +188,8 @@ const writeSwap = async ($: Engine, date: string, day: RoutineDay) =>
 const readRest = async ($: Engine, path: string) =>
   (await $.fs.exists(path)) && (await $.fs.read(path)).trim() !== 'off'
 
-// Progressive goals: at the day's first look, today's exercise moves on from
-// its last sessions, the next time it comes around. Days before are frozen at
-// the goals they were trained at first. Two sessions at once compute the same
-// move, and the second finds the routine already moved, so a goal moves once.
+// At the day's first look each of today's exercises moves on from its last sessions; days before keep their goals.
+// Two sessions at once compute the same move and the second finds it made, so a goal moves once.
 const progress = async ($: Engine, date: string) => {
   if (!progressConfig.isOn || progressedOn === date) return
   progressedOn = date
@@ -188,24 +198,26 @@ const progress = async ($: Engine, date: string) => {
   if (await $.fs.exists(`${logDir}/${date}.swap`)) return
   const routine = await loadRoutine($, routinePath)
   const now = await $.clock.now()
-  const day = routine[weekdayKey(now)]
-  // A multi day moves nothing until progressive goals move each of its exercises.
-  if (day === undefined || isMultiDay(day)) return
-  const plan = day.plans[0]
-  const singles = singleDays(routine)
-  if (plan === undefined || !canProgress(singles, plan.exercise)) return
+  const plans = (routine[weekdayKey(now)]?.plans ?? []).filter(plan => progressesAt(routine, plan.exercise, plan.goal))
+  if (plans.length === 0) return
   const before = lastDays(now, HISTORY_DAYS).slice(0, -1).reverse()
-  // Sessions on single days only: a multi day's exercise is no session of this goal yet.
-  const days = (await Promise.all(before.map(ms => readDated($, routine, logDir, ms)))).flatMap(d => (d.isMulti ? [] : d.entries))
-  const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
-  if (to === undefined) return
+  // Every exercise's sessions, single days and multi alike; an exercise with no reps that day had none.
+  const days = (await Promise.all(before.map(ms => readDay($, routine, logDir, ms)))).flat()
+  const moves = plans.flatMap(plan => {
+    const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
+    return to === undefined ? [] : [{ plan, to }]
+  })
+  if (moves.length === 0) return
   await freezePastDays($, routine)
-  // Single days move; multi days, and any entry the reader left out, stay as the file has them.
-  if (!(await writeGoals($, routinePath, moveGoal(singles, plan.exercise, plan.goal, to)))) return
-  const unit = plan.unit ?? ''
-  toast($, to > plan.goal
-    ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
-    : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`)
+  const movedRoutine = moves.reduce((soFar, { plan, to }) => moveGoal(soFar, plan.exercise, plan.goal, to), routine)
+  // Goals alone: a day's name, its other entries and any entry the reader left out stay as the file has them.
+  if (!(await writeGoals($, routinePath, movedRoutine))) return
+  toast($, moves.map(({ plan, to }) => {
+    const unit = plan.unit ?? ''
+    return to > plan.goal
+      ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
+      : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`
+  }).join(' '))
 }
 
 // Today from disk, with its pace file: refreshPace needs both, and reads the file once.
@@ -640,18 +652,16 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   await refreshPace($)
   const { goal, unit } = was
   if (goal > 0 && was.count < goal && count >= goal) {
+    // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
+    // next session of it goes. A swap counts; a goal of its own does not.
+    const isPlanned = progressConfig.isOn && progressesAt(await loadRoutine($, (await files($)).routine), was.exercise, goal)
+    const next = isPlanned ? ` Next ${was.exercise} day: ${goal + stepFor(goal)}${unit}.` : ''
     const left = exercises.filter(e => e.goal > 0 && e.count < e.goal)
     if (after.isMulti && left.length > 0) {
-      toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.`)
+      toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.${next}`)
     } else if (after.isMulti) {
-      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.`)
+      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.${next}`)
     } else {
-      // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
-      // next session of it goes. A swap counts; a goal of its own does not; a multi day moves nothing yet.
-      const routine = singleDays(await loadRoutine($, (await files($)).routine))
-      const isPlanned = progressConfig.isOn && !after.isMulti && canProgress(routine, was.exercise) &&
-        allPlans(routine).some(plan => plan.exercise === was.exercise && plan.goal === goal)
-      const next = isPlanned ? ` Next ${was.exercise} day: ${goal + stepFor(goal)}${unit}.` : ''
       toast($, `✅ Done. ${count}/${goal}${unit} ${was.exercise}. That's the work.${next}`)
     }
   } else if (added > 0) {
@@ -746,6 +756,9 @@ const markIntroduced = async ($: Engine) => {
 
 const KEEP = 'Keep my current routine'
 const CUSTOM = 'Custom goals'
+const CUSTOM_DAYS = 'Custom days'
+// The programs typed into fields, which must read before the step can be left.
+const isTypedProgram = (program: string) => program === CUSTOM || program === CUSTOM_DAYS
 const DEFAULT_PROGRAM = 'Push · dip · squat rotation'
 
 const openOnboarding = async ($: Engine) => {
@@ -767,12 +780,24 @@ const openOnboarding = async ($: Engine) => {
     hasRoutine,
     base,
     custom,
+    // Custom days starts from each weekday's current plan as a line.
+    days: Object.fromEntries(WEEK_LINES.map(([weekday]) => [weekday, dayLine(base[weekday])])),
     isCustomInvalid: false,
   }))
 }
 
+// Each Custom days line that does not read, by weekday.
+const typedErrors = (p: OnboardPick) => {
+  const typed = customDays(p.base, p.days)
+  return 'errors' in typed ? typed.errors : []
+}
+
 const pickedRoutine = (p: OnboardPick): Routine | undefined => {
   if (p.program === CUSTOM) return customRoutine(p.base, p.custom)
+  if (p.program === CUSTOM_DAYS) {
+    const typed = customDays(p.base, p.days)
+    return 'routine' in typed ? typed.routine : undefined
+  }
   const preset = ROUTINES[p.program as keyof typeof ROUTINES] as Routine | undefined
   return preset === undefined ? undefined : scale(preset, SIZES[p.size as keyof typeof SIZES] ?? 1)
 }
@@ -798,18 +823,21 @@ const finishOnboarding = async ($: Engine) => {
   const p = await read($, onboardPick)
   const { routine: routinePath } = await files($)
   const routine = pickedRoutine(p)
-  // A custom goal that isn't a number sends the person back to fix it.
-  if (p.program === CUSTOM && routine === undefined) {
+  // A custom goal that isn't a number, or a day line that doesn't read, sends the person back to fix it.
+  if (isTypedProgram(p.program) && routine === undefined) {
     await update($, onboardPick, now => ({ ...now, isCustomInvalid: true }))
     await update($, onboardStep, () => 1)
     return
   }
+  let isWritten = true
   if (routine !== undefined) {
     const old = await loadRoutine($, routinePath)
     if (JSON.stringify(old) !== JSON.stringify(routine)) await freezePastDays($, old)
     if (p.hasRoutine) await $.fs.write(`${routinePath}.bak`, await $.fs.read(routinePath))
-    // Custom goals change goals alone, so the file keeps what the reader left out; a preset replaces it.
-    if (p.program === CUSTOM) await writeGoals($, routinePath, routine)
+    // Custom goals change goals alone and Custom days only the days retyped, so the file keeps what
+    // the reader left out; a preset replaces it.
+    if (p.program === CUSTOM) isWritten = await writeGoals($, routinePath, routine)
+    else if (p.program === CUSTOM_DAYS) isWritten = await writeDays($, routinePath, routine, p.base)
     else await writeRoutine($, routinePath, routine)
   }
   await markIntroduced($)
@@ -817,6 +845,10 @@ const finishOnboarding = async ($: Engine) => {
   await refreshHistory($)
   await refreshPace($)
   await $.ui.close({ id: ONBOARD_PANE })
+  if (!isWritten) {
+    toast($, 'routine.json holds no JSON object, so the program was not written. Fix the file, or pick a preset.')
+    return
+  }
   const plan = routine ?? (await loadRoutine($, routinePath))
   toast($, `Program set: ${describeRoutine(plan)}. Get to work.`)
 }
@@ -1330,8 +1362,8 @@ export const register: Register = (on, options) => {
     const step = await read($, onboardStep)
     const p = await read($, onboardPick)
     const go = (to: number) => async () => {
-      // Custom goals must all be numbers before leaving the program step.
-      if (step === 1 && to > step && p.program === CUSTOM && pickedRoutine(p) === undefined) {
+      // Custom goals must all be numbers, and Custom days lines all read, before leaving the program step.
+      if (step === 1 && to > step && isTypedProgram(p.program) && pickedRoutine(p) === undefined) {
         await update($, onboardPick, now => ({ ...now, isCustomInvalid: true }))
         return
       }
@@ -1382,7 +1414,7 @@ export const register: Register = (on, options) => {
       // The mobile app draws no Input, so Custom needs another surface there.
       const elements = $.ui.resolve(e)
       const Input = e.surface !== 'mobile' && 'Input' in elements ? elements.Input : undefined
-      const programs = [...(p.hasRoutine ? [KEEP] : []), ...Object.keys(ROUTINES), ...(Input === undefined ? [] : [CUSTOM])]
+      const programs = [...(p.hasRoutine ? [KEEP] : []), ...Object.keys(ROUTINES), ...(Input === undefined ? [] : [CUSTOM, CUSTOM_DAYS])]
       const routine = pickedRoutine(p)
       const isCustom = p.program === CUSTOM
       const setGoal = (exercise: string) => (value: string) =>
@@ -1405,6 +1437,28 @@ export const register: Register = (on, options) => {
           {p.isCustomInvalid && <Text color="#d75f5f">Every goal needs a whole number above 0.</Text>}
         </Box>
       )
+      const setLine = (weekday: string) => (value: string) =>
+        void update($, onboardPick, now => ({ ...now, days: { ...now.days, [weekday]: value }, isCustomInvalid: false }))
+      const lines = Input !== undefined && p.program === CUSTOM_DAYS && (
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text dimColor>A line per day: [name:] goal exercise, … (180s plank for seconds)</Text>
+          {WEEK_LINES.map(([weekday, label]) => (
+            <Input
+              key={`day-${weekday}`}
+              label={label.padEnd(10)}
+              placeholder={dayLine(p.base[weekday]) || 'no plan'}
+              value={p.days[weekday] ?? ''}
+              submitLabel="set"
+              onInput={setLine(weekday)}
+              onSubmit={setLine(weekday)}
+            />
+          ))}
+          {p.isCustomInvalid && typedErrors(p).map(error => (
+            <Text key={`error-${error}`} color="#d75f5f">{error}</Text>
+          ))}
+        </Box>
+      )
       return (
         <Box flexDirection="column">
           {header('Pick your program')}
@@ -1417,7 +1471,8 @@ export const register: Register = (on, options) => {
             />
           ))}
           {fields}
-          {routine !== undefined && !isCustom && (
+          {lines}
+          {routine !== undefined && !isTypedProgram(p.program) && (
             <Box flexDirection="column">
               <Text> </Text>
               <Text dimColor>Goal size</Text>
@@ -1442,7 +1497,9 @@ export const register: Register = (on, options) => {
               ? describeRoutine(routine)
               : isCustom
                 ? 'Your days stay as they are, at these goals.'
-                : 'Your routine stays as it is.'}
+                : p.program === CUSTOM_DAYS
+                  ? "A line above doesn't read yet."
+                  : 'Your routine stays as it is.'}
           </Text>
           <Text> </Text>
           {nav}

@@ -66,6 +66,8 @@ Only days with reps count as sessions. A rest day or a day with no reps doesn't 
 
 With the default rotation, 100 pushups on Monday moves Thursday and Sunday to 105 as well. An exercise with two different goals in one routine (for example, 100 pushups on Monday and 50 on Thursday) doesn't progress. When you hit a goal, the toast tells you the next one: *"Next pushups day: 105."* On the day it moves, a toast says so.
 
+On a [multi day](#multi-exercise-days), each exercise moves on its own: its last sessions are the days it had reps, single or multi, so a hit on dips moves dips while pushups and plank keep their goals. Only that exercise's entry in the day's list changes; the day's name and its other entries stay.
+
 The new goal is written to `routine.json`. Before that, the days before today are frozen at the goals they had, so the grid still shows them as hit. `/fit progress off` stops the changes and keeps the goals where they are.
 
 ## Multi-exercise days
@@ -83,6 +85,8 @@ A weekday in `routine.json` can hold a whole session: an optional name and up to
 }
 ```
 
+Or type them in: `/fit program`, then **Custom days**, gives a line per weekday, filled in with its current plan. A line reads `[<name>:] <goal> <exercise>, <goal> <exercise>, …`, with `s` after a goal for seconds: `arms: 100 dips, 100 pushups, 180s plank` makes a multi day named arms with a 3-minute plank, and `30 burpees` a one-exercise day. A line names a multi day when it has a name or more than one exercise. The same rules as the file apply, and a line that breaks one keeps the step open, naming the weekday and what is wrong; nothing is written until every line reads. A unit is `s`, or one your `routine.json` already uses. Emptying a line leaves that weekday with no plan. Only the days you change are written; a line left as it was keeps its day in `routine.json` as written. A retyped day keeps each exercise's other fields and the entries left out of it, except one that would now join the plan (one past the fifth), which goes. Custom days needs a text field, so like Custom goals it isn't offered on mobile.
+
 On that day the band shows a status row (the day's name, its pace and your streak) and one row per exercise, each with its own progress bar and **+** buttons sized from that exercise's goal: the plank's buttons step in seconds, the dips' in reps. A finished exercise shows ✅ and no buttons. A **+** logs to its row. `/fit 20` logs to the exercise you logged last today, in any session, or to the first one when you haven't logged yet. `/fit 20 dips` logs to dips: the name matches in any case, and the start of a name works when only one exercise starts that way (`/fit 20 di`). A start that fits several exercises logs nothing and the reply names the ones it fits; a name not on today's plan logs nothing and the reply lists today's exercises. `/fit set 80 dips` fixes one exercise's count, and `/fit set 80` fixes the one you logged last. When an exercise finishes, a toast lists what is left today; when the whole day finishes, a toast lists every exercise's count. Every reply and toast names the exercise and what is left of it, and logging past an exercise's goal still counts.
 
 The day counts once for your streak when any exercise has reps, and as hit on the grid and the year only when every exercise hit its goal. All-time totals and best days count each exercise on its own.
@@ -91,7 +95,7 @@ An entry with no name, a goal of 0 or less, a name already listed (in any case),
 
 Strict mode paces a multi day as a whole, in percent of the day. Each exercise's share of its goal is capped at 100%, and the day's share is the average of those, so extra dips never cover a skipped plank. The day is 10 sets of 10%, spread over the training window like a single day's sets. A set reminder and a held prompt suggest a real set, a tenth of an exercise's goal, starting with the exercise you logged last or else the first one unfinished: with 100 dips and 180s of plank, *"⏱ Set due: 10% of arms, e.g. 10 dips or 18s plank. 20/100% by now."* Breathers, `/fit snooze` and `/fit window` keep their rules in those percent: what you owe, a breather's length and a `/fit window`'s spread are shares of the day. A set you log is measured against its own row's buttons, as on a single day: the row's smallest **+** or more earns the whole breather, fewer reps their share, and reps past that exercise's goal earn nothing. The band's status row shows the share due, such as `10% due now`, and a day with no name is called by its exercises, `10% of dips · plank`.
 
-Not on a multi day yet: progressive goals leave it alone, and `/fit swap` and `/fit goal` say they don't work there. `/fit reset` puts every exercise back to 0.
+Not on a multi day yet: `/fit swap` and `/fit goal` say they don't work there. `/fit reset` puts every exercise back to 0.
 
 ## The scoreboard
 
@@ -127,7 +131,7 @@ Every Claude Code session reads the same log in `~/.claude/fitness`, so a set yo
 | `/fit rest off` | undo today's rest day (or press **Train today** on the band) |
 | `/fit streak` | scoreboard: all-time totals, chart, the past year and the last week (run again or press Esc to close) |
 | `/fit streak 90` | scoreboard on the last 90 days (2 to 365) |
-| `/fit program` | pick your program (the walkthrough), or **Custom goals** to type each exercise's daily goal |
+| `/fit program` | pick your program (the walkthrough), or **Custom goals** to type each exercise's daily goal, or **Custom days** to type each weekday's exercises |
 | `/fit progress` | progressive goals on (`/fit progress off` to stop) |
 | `/fit strict` / `/fit easy` | strict mode on / off |
 | `/fit help` | every command + strict-mode rules (`/fit rules` still works) |
@@ -155,7 +159,7 @@ In `/config`, under terminal-gym:
 
 The mod makes no network calls and adds no hidden context for the model. `/fit` replies appear in your conversation like any slash command's output, so Claude can see them. Everything else stays on your machine: a few values in the mod's own store (see below), and your data in `~/.claude/fitness`:
 
-- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises, or a multi day, `{ "name": "Arms day", "exercises": [ … ] }` (see [Multi-exercise days](#multi-exercise-days)). Edit it for a custom program. With progressive goals on, the mod changes the goals in it, writing a single day back as one plan and a multi day as its name and list.
+- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises, or a multi day, `{ "name": "Arms day", "exercises": [ … ] }` (see [Multi-exercise days](#multi-exercise-days)). Edit it for a custom program. With progressive goals on, the mod changes the goals in it and nothing else: a single day stays one plan, a multi day keeps its name and list, and other keys stay as written.
 - `log/YYYY-MM-DD`: that day's count; on a multi day, a count per exercise, for example `{"dips":40,"pushups":20,"plank":0}`.
 - `log/YYYY-MM-DD.skip`: a rest day. If it contains `off`, the rest day was undone.
 - `log/YYYY-MM-DD.swap`: that day's plan after `/fit swap` or `/fit goal`, in the same shape as a routine day.
