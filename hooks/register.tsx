@@ -35,7 +35,6 @@ import {
   fullStreak,
   goalsOverFile,
   isDamagedLog,
-  isMultiDay,
   isRecord,
   keepsDateStreak,
   describeRoutine,
@@ -280,11 +279,16 @@ const progressDay = async ($: Engine, date: string) => {
 const readToday = async ($: Engine): Promise<{ t: Today; state: DayState }> => {
   const { log: logDir } = await files($)
   const date = dayKey(await $.clock.now())
+  // First, since a goal it moves is today's plan.
   await progress($, date)
-  const day = await dayOf($, date)
+  const [day, text, state, isRest] = await Promise.all([
+    dayOf($, date),
+    readLog($, `${logDir}/${date}`),
+    readDayState($, date),
+    readRest($, `${logDir}/${date}.skip`),
+  ])
   const plans = plansOf(day)
-  const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
-  const state = await readDayState($, date)
+  const counts = parseDayLog(text, plans.map(plan => plan.exercise))
   const { last } = state
   const kind = day?.isMulti === true
     ? { isMulti: true as const, ...(day.name === undefined ? {} : { name: day.name }) }
@@ -293,7 +297,7 @@ const readToday = async ($: Engine): Promise<{ t: Today; state: DayState }> => {
     date,
     exercises: plans.map((plan, i) => ({ exercise: plan.exercise, goal: plan.goal, unit: plan.unit ?? '', count: counts[i] ?? 0 })),
     ...kind,
-    isRest: await readRest($, `${logDir}/${date}.skip`),
+    isRest,
     ...(last === undefined ? {} : { last }),
   }
   await update($, today, () => next)
@@ -305,13 +309,16 @@ const refreshToday = async ($: Engine): Promise<Today> => (await readToday($)).t
 const DAY_MS = 86_400_000
 
 // A dated day as history entries: one on a single day, one per exercise on a multi day.
-const readDated = async ($: Engine, routine: Routine, logDir: string, ms: number) => {
+const readDay = async ($: Engine, routine: Routine, logDir: string, ms: number): Promise<Day[]> => {
   const date = dayKey(ms)
-  const day = (await readSwap($, logDir, date)) ?? routine[weekdayKey(ms)]
-  const plans = plansOf(day)
-  const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
-  const isSkipped = await readRest($, `${logDir}/${date}.skip`)
-  const entries: Day[] = plans.map((plan, i) => ({
+  const [swap, text, isSkipped] = await Promise.all([
+    readSwap($, logDir, date),
+    readLog($, `${logDir}/${date}`),
+    readRest($, `${logDir}/${date}.skip`),
+  ])
+  const plans = plansOf(swap ?? routine[weekdayKey(ms)])
+  const counts = parseDayLog(text, plans.map(plan => plan.exercise))
+  return plans.map((plan, i) => ({
     date,
     count: counts[i] ?? 0,
     goal: plan.goal,
@@ -319,10 +326,7 @@ const readDated = async ($: Engine, routine: Routine, logDir: string, ms: number
     isSkipped,
     ...(plan.unit === undefined ? {} : { unit: plan.unit }),
   }))
-  return { isMulti: day !== undefined && isMultiDay(day), entries }
 }
-
-const readDay = async ($: Engine, routine: Routine, logDir: string, ms: number) => (await readDated($, routine, logDir, ms)).entries
 
 // Days with reps in a row just before the window, so a streak can outlast it.
 // Cached per window: a full walk once, then one day's step as the window slides.
@@ -1541,7 +1545,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>Goal size</Text>
               <Box>
                 {Object.keys(SIZES).map(size => (
-                  <Box>
+                  <Box key={`size-box-${size}`}>
                     <Button
                       key={`size-${size}`}
                       label={`${size === p.size ? '●' : '○'} ${size}`}
