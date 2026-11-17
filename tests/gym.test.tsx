@@ -2507,6 +2507,23 @@ describe('multi days', () => {
     expect([...goalsOf(routine, 'mon'), ...goalsOf(routine, 'sun')]).toEqual([105, 105])
   })
 
+  test('a goal move routine.json refuses is said once and made at the next look', { options: { progress: true } }, async ($, on) => {
+    // routine.json reads as no JSON object once, at the move's own read, as a hand edit mid-save would:
+    // the first read is the look's, the second the write's.
+    const files = new (class extends Map<string, string> {
+      reads = 0
+      override get(path: string) {
+        if (path === ROUTINE && ++this.reads === 2) return '[]'
+        return super.get(path)
+      }
+    })([[ROUTINE, JSON.stringify({ mon: { exercise: 'pushups', goal: 100 }, sun: { exercise: 'pushups', goal: 100 } })], [`${LOG}/2026-10-04`, '100\n']])
+    const { toasts } = multiWorld(on, files)
+    await start($)
+    expect(toasts.filter(t => t.startsWith('routine.json holds no JSON object just now'))).toHaveLength(1)
+    expect(goalsOf(routineFile(files), 'mon')).toEqual([105])
+    expect(toasts).toContain('📈 pushups up to 105: your last session hit 100.')
+  })
+
   test('a swap file holds a multi day too', async ($, on) => {
     multiWorld(on, new Map([[`${TODAY_LOG}.swap`, `${JSON.stringify(ARMS)}\n`]]))
     await start($)
@@ -3229,7 +3246,7 @@ describe('custom days', () => {
   })
 
   test('a routine.json that is no JSON object is left alone, and the toast says so', async ($, on) => {
-    const { files, toasts } = daysWorld(on, new Map([[ROUTINE, '[]']]))
+    const { files, toasts } = daysWorld(on, new Map([[ROUTINE, '[]'], [`${LOG}/2026-10-04`, '100\n']]))
     await start($)
     // Keep comes first: an unreadable file is a routine of their own, not the default.
     const ui = await openDays($, 'program-5')
@@ -3238,6 +3255,24 @@ describe('custom days', () => {
     expect(files.get(ROUTINE)).toBe('[]')
     expect(toasts).toContain('routine.json holds no JSON object, so the program was not written. Fix the file, or pick a preset.')
     expect(toasts.some(t => t.startsWith('Program set'))).toBe(false)
+    // Nothing half-applied: no day frozen, no backup.
+    expect(files.has(`${LOG}/2026-10-04.swap`)).toBe(false)
+    expect(files.has(`${ROUTINE}.bak`)).toBe(false)
+  })
+
+  test('a routine.json that is no JSON reads as no plan, says so once, and takes no typed program', async ($, on) => {
+    const { files, toasts } = daysWorld(on, new Map([[ROUTINE, '{"mon": '], [`${LOG}/2026-10-04`, '100\n']]))
+    await start($)
+    expect((await fit($, '')).text).toContain('0/0 reps')
+    const unreadable = "routine.json doesn't read as JSON, so no day has a plan. Fix the file, or pick a program with /fit program."
+    expect(toasts.filter(t => t === unreadable)).toHaveLength(1)
+    const ui = await openDays($, 'program-5')
+    await ui.input({ key: 'day-tue', text: '30 burpees' })
+    await finish(ui)
+    expect(files.get(ROUTINE)).toBe('{"mon": ')
+    expect(toasts).toContain('routine.json holds no JSON object, so the program was not written. Fix the file, or pick a preset.')
+    expect(files.has(`${LOG}/2026-10-04.swap`)).toBe(false)
+    expect(files.has(`${ROUTINE}.bak`)).toBe(false)
   })
 
   test('a typed exercise the routine already has keeps its spelling', () => {

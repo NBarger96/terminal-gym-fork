@@ -98,6 +98,10 @@ let seenOnDisk = ''
 // a goal for, so the check runs once a day.
 const progressConfig = { isOn: false }
 let progressedOn = ''
+// The day a look is running for, so a look made meanwhile passes; and the day
+// routine.json last refused a move, so that is toasted once.
+let progressing = ''
+let refusedProgressOn = ''
 // The conversation the setup last ran for. /clear and /resume change it.
 let bootedFor = ''
 // The routine's left-out entries as last toasted: one toast per change, not per read.
@@ -134,30 +138,54 @@ const files = async ($: Engine) => {
 const writeRoutine = ($: Engine, routinePath: string, routine: Routine) =>
   $.fs.write(routinePath, `${JSON.stringify(routineToFile(routine), null, 2)}\n`)
 
-// Writes what `change` makes of routine.json's object, which keeps the rest as written.
-// A file that is no JSON object any more is left alone: false.
-const writeOverFile = async ($: Engine, routinePath: string, change: (raw: Record<string, unknown>) => Record<string, unknown>) => {
-  const raw: unknown = JSON.parse(await $.fs.read(routinePath))
+// routine.json's contents, or undefined when they are not JSON: another session may be
+// mid-write, so a file that doesn't parse is read once more before giving up.
+const readRoutineJson = async ($: Engine, routinePath: string): Promise<{ raw: unknown } | undefined> => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return { raw: JSON.parse(await $.fs.read(routinePath)) as unknown }
+    } catch {
+      // Read it again.
+    }
+  }
+  return undefined
+}
+
+// Writes what `change` makes of routine.json's object, which keeps the rest as written. `first` runs
+// once the file reads as a JSON object, just before the write, so nothing it does is left half-applied.
+// A file that is no JSON object any more is left alone, `first` is not run: false.
+const writeOverFile = async (
+  $: Engine,
+  routinePath: string,
+  change: (raw: Record<string, unknown>) => Record<string, unknown>,
+  first: () => Promise<void> = async () => {},
+) => {
+  const raw = (await readRoutineJson($, routinePath))?.raw
   if (!isRecord(raw)) return false
+  await first()
   await $.fs.write(routinePath, `${JSON.stringify(change(raw), null, 2)}\n`)
   return true
 }
 
 // Sets `routine`'s goals in routine.json (goalsOverFile).
-const writeGoals = ($: Engine, routinePath: string, routine: Routine) =>
-  writeOverFile($, routinePath, raw => goalsOverFile(raw, routine))
+const writeGoals = ($: Engine, routinePath: string, routine: Routine, first?: () => Promise<void>) =>
+  writeOverFile($, routinePath, raw => goalsOverFile(raw, routine), first)
 
 // Writes the days of `routine` that differ from `base` into routine.json (daysOverFile).
-const writeDays = ($: Engine, routinePath: string, routine: Routine, base: Routine) =>
-  writeOverFile($, routinePath, raw => daysOverFile(raw, routine, base))
+const writeDays = ($: Engine, routinePath: string, routine: Routine, base: Routine, first?: () => Promise<void>) =>
+  writeOverFile($, routinePath, raw => daysOverFile(raw, routine, base), first)
+
+// A routine.json that is no JSON reads as no plan on any day, as one with no JSON object does.
+const UNREADABLE = "routine.json doesn't read as JSON, so no day has a plan. Fix the file, or pick a program with /fit program."
 
 const loadRoutine = async ($: Engine, routinePath: string): Promise<Routine> => {
   if (!(await $.fs.exists(routinePath))) {
     await writeRoutine($, routinePath, DEFAULT_ROUTINE)
     return DEFAULT_ROUTINE
   }
-  const { routine, dropped } = parseRoutine(JSON.parse(await $.fs.read(routinePath)))
-  const warning = dropped.length === 0 ? '' : droppedText(dropped)
+  const read = await readRoutineJson($, routinePath)
+  const { routine, dropped } = read === undefined ? { routine: {}, dropped: [] } : parseRoutine(read.raw)
+  const warning = read === undefined ? UNREADABLE : dropped.length === 0 ? '' : droppedText(dropped)
   if (warning !== warnedDropped) {
     warnedDropped = warning
     if (warning !== '') toast($, warning)
@@ -200,17 +228,27 @@ const readRest = async ($: Engine, path: string) =>
   (await $.fs.exists(path)) && (await $.fs.read(path)).trim() !== 'off'
 
 // At the day's first look each of today's exercises moves on from its last sessions; days before keep their goals.
-// Two sessions at once compute the same move and the second finds it made, so a goal moves once.
+// Two sessions at once compute the same move and the second finds it made, so a goal moves once. The day
+// counts as looked at once the check is done; a move routine.json refused is tried again at the next look.
 const progress = async ($: Engine, date: string) => {
-  if (!progressConfig.isOn || progressedOn === date) return
-  progressedOn = date
+  if (!progressConfig.isOn || progressedOn === date || progressing === date) return
+  progressing = date
+  try {
+    if (await progressDay($, date)) progressedOn = date
+  } finally {
+    progressing = ''
+  }
+}
+
+// One look at the day's goals: true once it is done, false when routine.json refused the move.
+const progressDay = async ($: Engine, date: string) => {
   const { routine: routinePath, log: logDir } = await files($)
   // A day with a plan of its own (`/fit swap`, `/fit goal`) isn't the routine's.
-  if (await $.fs.exists(`${logDir}/${date}.swap`)) return
+  if (await $.fs.exists(`${logDir}/${date}.swap`)) return true
   const routine = await loadRoutine($, routinePath)
   const now = await $.clock.now()
   const plans = (routine[weekdayKey(now)]?.plans ?? []).filter(plan => progressesAt(routine, plan.exercise, plan.goal))
-  if (plans.length === 0) return
+  if (plans.length === 0) return true
   const before = lastDays(now, HISTORY_DAYS).slice(0, -1).reverse()
   // Every exercise's sessions, single days and multi alike; an exercise with no reps that day had none.
   const days = (await Promise.all(before.map(ms => readDay($, routine, logDir, ms)))).flat()
@@ -218,17 +256,24 @@ const progress = async ($: Engine, date: string) => {
     const to = nextGoal(plan.goal, days.filter(day => sameExercise(day.exercise, plan.exercise)))
     return to === undefined ? [] : [{ plan, to }]
   })
-  if (moves.length === 0) return
-  await freezePastDays($, routine)
+  if (moves.length === 0) return true
   const movedRoutine = moves.reduce((soFar, { plan, to }) => moveGoal(soFar, plan.exercise, plan.goal, to), routine)
   // Goals alone: a day's name, its other entries and any entry the reader left out stay as the file has them.
-  if (!(await writeGoals($, routinePath, movedRoutine))) return
+  // The days before are frozen at their goals only once the file takes the write.
+  if (!(await writeGoals($, routinePath, movedRoutine, () => freezePastDays($, routine)))) {
+    if (refusedProgressOn !== date) {
+      refusedProgressOn = date
+      toast($, "routine.json holds no JSON object just now, so today's goals did not move. They move at the next look once the file reads.")
+    }
+    return false
+  }
   toast($, moves.map(({ plan, to }) => {
     const unit = plan.unit ?? ''
     return to > plan.goal
       ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
       : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`
   }).join(' '))
+  return true
 }
 
 // Today from disk, with its pace file: refreshPace needs both, and reads the file once.
@@ -840,13 +885,19 @@ const finishOnboarding = async ($: Engine) => {
   let isWritten = true
   if (routine !== undefined) {
     const old = await loadRoutine($, routinePath)
-    if (JSON.stringify(old) !== JSON.stringify(routine)) await freezePastDays($, old)
-    if (p.hasRoutine) await $.fs.write(`${routinePath}.bak`, await $.fs.read(routinePath))
+    // Run only once the write can land, so a refused one leaves no day frozen and no backup behind.
+    const first = async () => {
+      if (JSON.stringify(old) !== JSON.stringify(routine)) await freezePastDays($, old)
+      if (p.hasRoutine) await $.fs.write(`${routinePath}.bak`, await $.fs.read(routinePath))
+    }
     // Custom goals change goals alone and Custom days only the days retyped, so the file keeps what
     // the reader left out; a preset replaces it.
-    if (p.program === CUSTOM) isWritten = await writeGoals($, routinePath, routine)
-    else if (p.program === CUSTOM_DAYS) isWritten = await writeDays($, routinePath, routine, p.base)
-    else await writeRoutine($, routinePath, routine)
+    if (p.program === CUSTOM) isWritten = await writeGoals($, routinePath, routine, first)
+    else if (p.program === CUSTOM_DAYS) isWritten = await writeDays($, routinePath, routine, p.base, first)
+    else {
+      await first()
+      await writeRoutine($, routinePath, routine)
+    }
   }
   await markIntroduced($)
   await refreshToday($)
@@ -890,6 +941,7 @@ const boot = async ($: Engine) => {
   if (typeof range === 'number') await update($, chartDays, () => range)
   // A new conversation looks again: the routine may have moved since.
   progressedOn = ''
+  refusedProgressOn = ''
   await refreshToday($)
   await refreshHistory($)
   // Re-arms the due timer, which a restart or reload drops.
