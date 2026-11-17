@@ -674,14 +674,31 @@ const swapDays = (routine: Routine) => {
   return [...days.values()]
 }
 
-// Where a bare swap starts: today's day, else a multi day of today's name (one exercise swapped since).
+// Where a bare swap starts: today's day, else the multi day today came from by swapping exercises: the day of
+// today's name, or for a day with no name, the unnamed day sharing the most exercises with it, place for place.
 const swapIndex = (days: readonly RoutineDay[], current: RoutineDay) => {
   const at = days.findIndex(day => swapKey(day) === swapKey(current))
-  if (at >= 0 || !isMultiDay(current) || current.name === undefined) return at
-  return days.findIndex(day => isMultiDay(day) && normalName(day.name ?? '') === normalName(current.name ?? ''))
+  if (at >= 0 || !isMultiDay(current)) return at
+  if (current.name !== undefined) return days.findIndex(day => isMultiDay(day) && normalName(day.name ?? '') === normalName(current.name ?? ''))
+  const shared = (day: RoutineDay) =>
+    isMultiDay(day) && day.name === undefined && day.plans.length === current.plans.length
+      ? day.plans.filter((plan, i) => sameExercise(plan.exercise, current.plans[i]?.exercise ?? '')).length
+      : 0
+  let best = -1
+  let most = 0
+  days.forEach((day, i) => {
+    const n = shared(day)
+    if (n > most) [best, most] = [i, n]
+  })
+  return best
 }
 
-// The swap a bare `/fit swap`, a day's name, one exercise or two names asks for; a day's name beats an exercise's.
+// Whether a match is a whole name rather than the start of one.
+const isWhole = (match: ExerciseMatch, typed: string, names: readonly string[]) =>
+  match.kind === 'one' && normalName(names[match.index] ?? '') === normalName(typed)
+
+// The swap a bare `/fit swap`, a day's name, one exercise or two names asks for. A whole name beats the start
+// of one; between two whole names or two starts, a day's name beats an exercise's.
 export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): SwapPick => {
   const plans = [...new Map(allPlans(routine).map(plan => [normalName(plan.exercise), plan])).values()]
   const names = plans.map(plan => plan.exercise)
@@ -699,7 +716,12 @@ export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): Swa
   const byExercise = matchExercise(typed, names)
   const today = current.plans.map(plan => plan.exercise)
   const twoNames = `/fit swap <out> <in> puts one exercise in place of another. Today: ${today.join(', ')}.`
-  if (byDay.kind === 'one') {
+  const isExerciseWhole = isWhole(byExercise, typed, names)
+  // The start of several days and of one exercise: the reply names them all.
+  if (byDay.kind === 'many' && byExercise.kind === 'one' && !isExerciseWhole) {
+    return { kind: 'refuse', text: couldBeText(typed, [...byDay.names, names[byExercise.index] ?? typed], 'nothing swapped') }
+  }
+  if (byDay.kind === 'one' && (isWhole(byDay, typed, dayNames) || !isExerciseWhole)) {
     const day = [...named.values()][byDay.index] ?? current
     if (swapKey(day) === swapKey(current)) return same(current)
     const also = byExercise.kind === 'one' ? [names[byExercise.index] ?? typed] : byExercise.kind === 'many' ? byExercise.names : []
@@ -719,11 +741,18 @@ export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): Swa
   // Two names: each split of the words, the first part one of today's exercises and the rest one of the routine's.
   const words = normalName(typed).split(' ')
   let unclear: string | undefined
+  // The word a split found no exercise for, so the reply names it rather than everything typed.
+  let unknownIn: string | undefined
+  let unknownOut: string | undefined
   for (let i = 1; i < words.length; i++) {
     const outName = words.slice(0, i).join(' ')
+    const inName = words.slice(i).join(' ')
     const out = matchExercise(outName, today)
-    const into = matchExercise(words.slice(i).join(' '), names)
+    const into = matchExercise(inName, names)
     if (out.kind === 'many' && into.kind === 'one') unclear ??= couldBeText(outName, out.names, 'nothing swapped')
+    if (out.kind === 'one' && into.kind === 'many') unclear ??= couldBeText(inName, into.names, 'nothing swapped')
+    if (out.kind === 'one' && into.kind === 'none') unknownIn ??= inName
+    if (out.kind === 'none' && into.kind === 'one' && matchExercise(outName, names).kind === 'one') unknownOut ??= outName
     if (out.kind !== 'one' || into.kind !== 'one') continue
     const old = current.plans[out.index] ?? NO_PLAN
     const plan = plans[into.index] ?? NO_PLAN
@@ -732,8 +761,9 @@ export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): Swa
     return { kind: 'moved', day: withPlan(current, out.index, plan), moved: { from: old.exercise, to: plan.exercise } }
   }
   if (unclear !== undefined) return { kind: 'refuse', text: unclear }
+  if (unknownIn === undefined && unknownOut !== undefined) return { kind: 'refuse', text: `${unknownOut} isn't on today's plan, so nothing swapped. Today: ${today.join(', ')}.` }
   const orDay = dayNames.length === 0 ? '' : ` Or a day: ${dayNames.join(', ')}.`
-  return { kind: 'refuse', text: `No ${typed} in your program. Pick one of: ${names.join(', ')}.${orDay}${isMultiDay(current) ? ` ${twoNames}` : ''}` }
+  return { kind: 'refuse', text: `No ${unknownIn ?? typed} in your program. Pick one of: ${names.join(', ')}.${orDay}${isMultiDay(current) ? ` ${twoNames}` : ''}` }
 }
 
 // A log's counts by key: numbers only, never below 0, so a hand-edited log reads as parseDayLog reads it.

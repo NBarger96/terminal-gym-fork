@@ -482,6 +482,17 @@ const reschedule = async ($: Engine, date: string): Promise<Pace | null> => {
   return refreshPace($)
 }
 
+// A swap between a multi day, paced in percent, and a single day, paced in its own reps, changes the
+// scale a `/fit window`'s `base` is in. So the window keeps its end, and what is left on the new
+// scale is spread from now to that end: still what is left, over the hours named.
+const rescaleWindow = async ($: Engine, t: Today) => {
+  const { window } = await readDayState($, t.date)
+  if (window === undefined) return
+  const now = await $.clock.now()
+  const ms = Math.max(1, window.from + window.ms - now)
+  await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms, base: scaleOf(t).count } }))
+}
+
 // The span today's sets are spread over: the configured window from the first
 // prompt, or after `/fit window`, the reps left then (above `base`) over the hours named.
 const scheduleOf = ({ window, start }: DayState): Schedule | undefined => {
@@ -1074,8 +1085,11 @@ export const register: Register = (on, options) => {
         if (moved !== undefined && before.last === moved.from) await writeDayState($, before.date, state => ({ ...state, last: moved.to }))
         await refreshHistory($)
         const swapped = await refreshToday($)
-        await refreshPace($)
-        return { text: `${swapText(pick, before, swapped)} ${todayText(swapped)}` }
+        // A change of scale reschedules: a window and a breather sized in the old one no longer fit.
+        const isRescaled = swapped.isMulti !== before.isMulti
+        if (isRescaled) await rescaleWindow($, swapped)
+        const p = isRescaled ? await reschedule($, before.date) : await refreshPace($)
+        return { text: `${swapText(pick, before, swapped)}${thenToday(swapped, paceText(p, isStrict, await $.clock.now()))}` }
       }
       case 'goal': {
         // Today's plan with a new goal, in the same file `/fit swap` writes.
@@ -1087,7 +1101,7 @@ export const register: Register = (on, options) => {
         await refreshHistory($)
         const after = await refreshToday($)
         const { exercise, unit = '' } = pick.plan
-        return { text: `Today's goal is ${cmd.n}${unit} ${exercise}. ${todayText(after)}${paceText(await reschedule($, before.date), isStrict, await $.clock.now())}` }
+        return { text: `Today's goal is ${cmd.n}${unit} ${exercise}.${thenToday(after, paceText(await reschedule($, before.date), isStrict, await $.clock.now()))}` }
       }
       case 'window': {
         const t = await refreshToday($)
