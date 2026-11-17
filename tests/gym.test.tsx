@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, droppedText, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, droppedText, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, swappedLog, untilText } from '../hooks/lib'
 
 // A routine as routine.json would hold it, read into the shape the helpers take.
 const asRoutine = (raw: object) => parseRoutine(raw).routine
@@ -2640,6 +2640,19 @@ describe('multi days', () => {
     expect((await fit($, '')).text).toContain('20/180s plank')
   })
 
+  test('a routine edit that makes today a single day keeps the other counts through its logs', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pushups":20,"plank":0}\n']]))
+    await start($)
+    files.set(ROUTINE, JSON.stringify({ mon: { exercise: 'dips', goal: 100 } }))
+    expect((await fit($, '5')).text).toContain('45/100 dips')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":45,"pushups":20,"plank":0}\n')
+    files.set(ROUTINE, JSON.stringify({ mon: ARMS }))
+    expect((await fit($, '')).text).toContain('20/50 pushups')
+    // A single day's log with nothing else to keep stays a plain count.
+    expect(formatDayLog([{ exercise: 'dips', count: 45 }], false, '40\n')).toBe('45\n')
+    expect(formatDayLog([{ exercise: 'dips', count: 45 }], false, '{"Dips":40}\n')).toBe('45\n')
+  })
+
   test('custom goals keep what routine.json holds beyond the goals typed', async ($, on) => {
     const written = {
       _note: 'my program',
@@ -2949,6 +2962,20 @@ describe('multi days', () => {
     const back = (await fit($, 'swap')).text
     expect(back).toContain('🏋 Arms day')
     expect(back).toContain('20/50 pushups')
+  })
+
+  test('a day swapped to a single day keeps the other counts through its logs and swaps, so the way back finds them', async ($, on) => {
+    const { files } = multiWorld(on, armsAndCore([[TODAY_LOG, '{"dips":40,"pushups":20,"plank":0}\n']]))
+    await start($)
+    expect((await fit($, 'swap')).text).toContain('Swapped to dips today.')
+    expect((await fit($, '5')).text).toContain('45/100 dips')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":45,"pushups":20,"plank":0}\n')
+    // A single day to another carries its one count, and the other counts still stay.
+    expect((await fit($, 'swap situps')).text).toContain('45/60 situps')
+    expect(files.get(TODAY_LOG)).toBe('{"situps":45,"pushups":20,"plank":0}\n')
+    expect((await fit($, 'swap arms day')).text).toContain('20/50 pushups')
+    expect(swappedLog([{ exercise: 'dips', count: 40 }], { plans: [{ exercise: 'squats', goal: 300 }] }, '{"dips":40,"pushups":20}\n'))
+      .toBe('{"squats":40,"pushups":20}\n')
   })
 
   test('/fit goal <n> <exercise> changes one goal for today only; a bare /fit goal asks which', async ($, on) => {

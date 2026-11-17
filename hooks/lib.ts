@@ -156,11 +156,12 @@ export const parseDayLog = (text: string | undefined, exercises: readonly string
   return zeros.map((zero, i) => (i === 0 && Number.isFinite(n) ? n : zero))
 }
 
-// A multi day's log keeps the counts `before` (the file's text) holds for exercises off its plan now.
+// A log keeps the counts `before` (the file's text) holds for exercises off today's plan, so a swap or
+// a routine edit back finds them. A single day writes a plain count when there are none to keep.
 export const formatDayLog = (entries: readonly { exercise: string; count: number }[], isMulti: boolean, before?: string) => {
-  if (!isMulti) return `${entries[0]?.count ?? 0}\n`
   const planned = new Set(entries.map(({ exercise }) => normalName(exercise)))
   const kept = Object.entries(countsObject(before?.trim() ?? '') ?? {}).filter(([key]) => !planned.has(normalName(key)))
+  if (!isMulti && kept.length === 0) return `${entries[0]?.count ?? 0}\n`
   return `${JSON.stringify(Object.fromEntries([...entries.map(({ exercise, count }) => [exercise, count] as const), ...kept]))}\n`
 }
 
@@ -753,10 +754,15 @@ export const swappedLog = (from: readonly Count[], to: RoutineDay, before?: stri
   const countOf = (exercise: string) => counts.get(normalName(exercise))?.count ?? 0
   const plans = to.plans.length === 0 ? [NO_PLAN] : to.plans
   const [first = NO_PLAN] = plans
-  // A single day's one count carries to another single day, as it always has.
-  if (!isMultiDay(to) && from.length === 1) return formatDayLog([{ exercise: first.exercise, count: from[0]?.count ?? 0 }], false)
-  const offPlan = Object.fromEntries([...counts.values()].map(({ exercise, count }) => [exercise, count]))
-  return formatDayLog(plans.map(plan => ({ exercise: plan.exercise, count: countOf(plan.exercise) })), true, JSON.stringify(offPlan))
+  const offPlan = () => JSON.stringify(Object.fromEntries([...counts.values()].map(({ exercise, count }) => [exercise, count])))
+  // A single day's one count carries to another single day; the log's other counts stay beside it.
+  const [carried] = from
+  if (!isMultiDay(to) && from.length === 1 && carried !== undefined) {
+    counts.delete(normalName(carried.exercise))
+    counts.delete(normalName(first.exercise))
+    return formatDayLog([{ exercise: first.exercise, count: carried.count }], false, offPlan())
+  }
+  return formatDayLog(plans.map(plan => ({ exercise: plan.exercise, count: countOf(plan.exercise) })), true, offPlan())
 }
 
 // The reply's opening for a swap made: what changed, the count carried or kept, and a day name that beat an exercise.
