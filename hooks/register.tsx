@@ -40,6 +40,7 @@ import {
   heatCells,
   lastDays,
   logTarget,
+  matchExercise,
   moveGoal,
   nextGoal,
   noonOf,
@@ -509,8 +510,9 @@ const paceText = (p: Pace | null, isStrict: boolean, now: number) => {
 
 const isFinished = (e: TodayExercise) => e.goal > 0 && e.count >= e.goal
 
-const line = (e: TodayExercise) =>
-  `${isFinished(e) ? '✅' : '💪'} ${bar(e.count, e.goal)} ${e.count}/${e.goal}${e.unit} ${e.exercise}`
+const countText = (e: TodayExercise) => `${e.count}/${e.goal}${e.unit} ${e.exercise}`
+
+const line = (e: TodayExercise) => `${isFinished(e) ? '✅' : '💪'} ${bar(e.count, e.goal)} ${countText(e)}`
 
 // What is left of an exercise, for a multi day's replies.
 const leftText = (e: TodayExercise) =>
@@ -555,11 +557,10 @@ const setText = (t: Today, owed: number) => (t.isMulti ? `${owedOf(t, owed)}, e.
 // "20/100 by now", in the pace's own unit.
 const byNow = (t: Today, p: Pace) => `${p.required}/${scaleOf(t).goal}${p.unit ?? ''} by now`
 
-// A bare /fit logs to the last exercise, so a multi day offers it only when that is the one suggested.
+// A multi day names the exercise, since a bare /fit logs to the last one, not the one suggested.
 const logHow = (t: Today, owed: number) => {
-  if (!t.isMulti) return `/fit ${owed} to log it`
-  const [lead] = setIdeas(t.exercises, t.last)
-  return lead !== undefined && focusOf(t).exercise === lead.exercise ? `/fit ${lead.amount} logs ${lead.exercise}` : 'A + button logs it'
+  const [lead] = t.isMulti ? setIdeas(t.exercises, t.last) : []
+  return lead === undefined ? `/fit ${owed} to log it` : `/fit ${lead.amount} ${lead.exercise} to log it`
 }
 
 // A single day keeps its unit, since the reply names reps or seconds left.
@@ -642,6 +643,8 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
     const left = exercises.filter(e => e.goal > 0 && e.count < e.goal)
     if (after.isMulti && left.length > 0) {
       toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.`)
+    } else if (after.isMulti) {
+      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.`)
     } else {
       // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
       // next session of it goes. A swap counts; a goal of its own does not; a multi day moves nothing yet.
@@ -863,7 +866,7 @@ const boot = async ($: Engine) => {
   await $.command.register({
     name: 'fit',
     description: "Log reps toward today's goal",
-    argumentHint: '[n | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
+    argumentHint: '[n [exercise] | set n [exercise] | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
     immediate: true,
   })
 }
@@ -907,10 +910,21 @@ export const register: Register = (on, options) => {
         return { text: cmd.text }
       case 'add':
       case 'set': {
-        if ((await refreshToday($)).isRest) return { text: "Today's a rest day. /fit rest off to train." }
+        const before = await refreshToday($)
+        if (before.isRest) return { text: "Today's a rest day. /fit rest off to train." }
+        let exercise: string | undefined
+        if (cmd.typedName !== undefined) {
+          const names = before.exercises.map(e => e.exercise)
+          const match = matchExercise(cmd.typedName, names)
+          if (match.kind === 'many') return { text: `"${cmd.typedName}" could be ${match.names.join(' or ')}, so nothing logged. Type more of the name.` }
+          if (match.kind === 'none') return { text: `No ${cmd.typedName} today, so nothing logged. Today: ${names.join(', ')}.` }
+          exercise = names[match.index]
+        }
         const n = cmd.n
-        const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n))
-        const logged = focusOf(t)
+        const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
+        const logged = exercise === undefined ? focusOf(t) : t.exercises.find(e => e.exercise === exercise)
+        // The plan changed under the command: logReps logged nothing and toasted why.
+        if (logged === undefined) return { text: `${exercise} isn't on today's plan any more, so nothing logged.` }
         return { text: `${line(logged)}${t.isMulti ? leftText(logged) : ''}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
       }
       case 'skip': {
