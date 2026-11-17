@@ -30,16 +30,21 @@ export const allPlans = (routine: Routine) => Object.values(routine).flatMap(day
 export const singleDays = (routine: Routine): Routine =>
   Object.fromEntries(Object.entries(routine).filter(([, day]) => !isMultiDay(day)))
 
-const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+
+export const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+
+// A name from a file as it is shown: no C0 or C1 control characters, so no terminal escape or newline.
+const shown = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 
 // A single day's plan reads as it always has: any named exercise with a numeric
 // goal, 0 included (a frozen day with no plan is `{ exercise: "reps", goal: 0 }`).
 // Fields of its own beyond these stay, so a rewrite keeps them.
 const asPlan = (raw: unknown): Plan | undefined => {
-  if (!isRecord(raw) || typeof raw.exercise !== 'string' || raw.exercise.trim() === '') return undefined
+  if (!isRecord(raw) || typeof raw.exercise !== 'string' || shown(raw.exercise).trim() === '') return undefined
   if (typeof raw.goal !== 'number' || !Number.isFinite(raw.goal)) return undefined
   const { unit, ...rest } = raw
-  return { ...rest, exercise: raw.exercise, goal: raw.goal, ...(typeof unit === 'string' ? { unit } : {}) }
+  return { ...rest, exercise: shown(raw.exercise), goal: raw.goal, ...(typeof unit === 'string' ? { unit: shown(unit) } : {}) }
 }
 
 // One routine day from its file form. `dropped` names each entry left out, for
@@ -51,8 +56,8 @@ export const parseRoutineDay = (raw: unknown, where = ''): { day?: RoutineDay; d
     const dropped: string[] = []
     const seen = new Set<string>()
     const plans: Plan[] = []
-    for (const [i, entry] of (raw.exercises as unknown[]).entries()) {
-      const name = isRecord(entry) && typeof entry.exercise === 'string' ? entry.exercise.trim() : ''
+    for (const [i, entry] of raw.exercises.entries()) {
+      const name = isRecord(entry) && typeof entry.exercise === 'string' ? shown(entry.exercise).trim() : ''
       const plan = asPlan(entry)
       const why =
         name === '' ? 'no name'
@@ -67,18 +72,20 @@ export const parseRoutineDay = (raw: unknown, where = ''): { day?: RoutineDay; d
       seen.add(name.toLowerCase())
       plans.push({ ...plan, exercise: name })
     }
-    const name = typeof raw.name === 'string' && raw.name.trim() !== '' ? raw.name.trim() : undefined
+    const named = typeof raw.name === 'string' ? shown(raw.name).trim() : ''
+    const name = named === '' ? undefined : named
     return { ...(plans.length === 0 ? {} : { day: { isMulti: true, ...(name === undefined ? {} : { name }), plans } }), dropped }
   }
   const plan = asPlan(raw)
   return plan === undefined ? { dropped: [`${at}(not a plan)`] } : { day: single(plan), dropped: [] }
 }
 
-// routine.json's contents as a Routine, and every entry it left out.
+// routine.json's contents as a Routine, and every weekday entry it left out. Other keys are no day.
 export const parseRoutine = (raw: unknown): { routine: Routine; dropped: string[] } => {
   const routine: Routine = {}
   const dropped: string[] = []
   for (const [weekday, value] of Object.entries(isRecord(raw) ? raw : {})) {
+    if (!WEEKDAYS.includes(weekday)) continue
     const read = parseRoutineDay(value, weekday)
     if (read.day !== undefined) routine[weekday] = read.day
     dropped.push(...read.dropped)
@@ -125,10 +132,35 @@ export const parseDayLog = (text: string | undefined, exercises: readonly string
   return zeros.map((zero, i) => (i === 0 && Number.isFinite(n) ? n : zero))
 }
 
-export const formatDayLog = (entries: readonly { exercise: string; count: number }[], isMulti: boolean) =>
-  isMulti
-    ? `${JSON.stringify(Object.fromEntries(entries.map(({ exercise, count }) => [exercise, count])))}\n`
-    : `${entries[0]?.count ?? 0}\n`
+// A multi day's log keeps the counts `before` (the file's text) holds for exercises off its plan now.
+export const formatDayLog = (entries: readonly { exercise: string; count: number }[], isMulti: boolean, before?: string) => {
+  if (!isMulti) return `${entries[0]?.count ?? 0}\n`
+  const planned = new Set(entries.map(({ exercise }) => exercise.toLowerCase()))
+  const kept = Object.entries(countsObject(before?.trim() ?? '') ?? {}).filter(([key]) => !planned.has(key.toLowerCase()))
+  return `${JSON.stringify(Object.fromEntries([...entries.map(({ exercise, count }) => [exercise, count] as const), ...kept]))}\n`
+}
+
+// One day of routine.json with the day's goals set in it. A multi day's entries
+// match its plans as the parser kept them; an entry it left out stays as written.
+const dayGoalsOverFile = (rawDay: unknown, day: RoutineDay) => {
+  if (!isRecord(rawDay)) return dayToFile(day)
+  if (!isMultiDay(day)) return { ...rawDay, goal: day.plans[0]?.goal ?? rawDay.goal }
+  if (!Array.isArray(rawDay.exercises)) return dayToFile(day)
+  const left = [...day.plans]
+  const exercises = rawDay.exercises.map((entry: unknown) => {
+    const plan = asPlan(entry)
+    const at = plan === undefined || plan.goal <= 0 ? -1 : left.findIndex(kept => kept.exercise === plan.exercise.trim())
+    const [match] = at < 0 ? [] : left.splice(at, 1)
+    return match === undefined || !isRecord(entry) ? entry : { ...entry, goal: match.goal }
+  })
+  return { ...rawDay, exercises }
+}
+
+// routine.json's contents with `routine`'s goals set in place: other keys, days and left-out entries stay as written.
+export const goalsOverFile = (raw: Record<string, unknown>, routine: Routine): Record<string, unknown> => ({
+  ...raw,
+  ...Object.fromEntries(Object.entries(routine).map(([weekday, day]) => [weekday, dayGoalsOverFile(raw[weekday], day)])),
+})
 
 // Which exercise a bare `/fit 20` logs to: the one logged last today, or the first.
 export const logTarget = (exercises: readonly { exercise: string }[], last: string | undefined) =>
@@ -144,7 +176,6 @@ export const DEFAULT_ROUTINE: Routine = {
   sun: single({ exercise: 'pushups', goal: 100 }),
 }
 
-const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 const DAY_MS = 86_400_000
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -391,11 +422,15 @@ export const scale = (routine: Routine, factor: number): Routine =>
   mapPlans(routine, plan => ({ ...plan, goal: Math.max(5, Math.round((plan.goal * factor) / 5) * 5) }))
 
 // Each exercise in a routine once, with its first day's goal.
-export const exerciseGoals = (routine: Routine) => {
-  const goals: Record<string, number> = {}
-  for (const plan of allPlans(routine)) goals[plan.exercise] ??= plan.goal
-  return goals
+export const exerciseGoals = (routine: Routine): Record<string, number> => {
+  const goals = new Map<string, number>()
+  for (const plan of allPlans(routine)) if (!goals.has(plan.exercise)) goals.set(plan.exercise, plan.goal)
+  return Object.fromEntries(goals)
 }
+
+// The goal typed for an exercise: an own field only, so `constructor` is never Object's.
+export const typedGoal = (typed: Record<string, string>, exercise: string) =>
+  Object.hasOwn(typed, exercise) ? (typed[exercise] ?? '') : ''
 
 // A custom program: the base routine's days, each exercise at the goal typed
 // for it. A field left at its prefill changes nothing, so days that differ keep
@@ -403,7 +438,7 @@ export const exerciseGoals = (routine: Routine) => {
 export const customRoutine = (base: Routine, goals: Record<string, string>): Routine | undefined => {
   const parsed = new Map<string, number>()
   for (const [exercise, prefill] of Object.entries(exerciseGoals(base))) {
-    const text = (goals[exercise] ?? '').trim()
+    const text = typedGoal(goals, exercise).trim()
     if (!/^\d+$/.test(text) || Number(text) <= 0) return undefined
     if (Number(text) !== prefill) parsed.set(exercise, Number(text))
   }
@@ -556,6 +591,7 @@ const CHEERS = ['Good set.', 'Strong set.', 'Reps in the bank.', 'Keep stacking.
 // number, not the rep count: sets come in fives, so a count like 30, 60, 90
 // would land on one line every time.
 export const cheer = (added: number, count: number, goal: number, exercise: string, unit = '') => {
+  if (goal > 0 && count >= goal) return `💪 +${added}${unit} ${exercise}, done (${count}/${goal}${unit}).`
   const line = CHEERS[Math.floor(count / Math.max(1, added)) % CHEERS.length] ?? CHEERS[0]
   const left = goal > count ? ` ${goal - count}${unit} to go.` : ''
   return `💪 +${added}${unit} ${exercise}. ${line}${left}`
@@ -616,7 +652,7 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - the band shows the day's name, pace and streak, then a row per exercise with its own bar and **+** buttons (seconds for a timed one)
 - a **+** logs to its row; \`/fit 20\` logs to the exercise you logged last, or the first
 - a finished exercise shows ✅; the day counts once for the streak, and as hit when every exercise is
-- entries with no name, a goal of 0, a repeated name or past the fifth are left out, and a toast names them
+- entries with no name, a goal of 0 or less, a repeated name or past the fifth are left out, and a toast names them
 - not yet on a multi day: \`/fit swap\`, \`/fit goal\`, \`/fit window\`, \`/fit snooze\`, strict holds and progressive goals
 
 ### Your data

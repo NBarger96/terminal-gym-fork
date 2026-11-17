@@ -29,8 +29,10 @@ import {
   exerciseGoals,
   formatDayLog,
   fullStreak,
+  goalsOverFile,
   isDamagedLog,
   isMultiDay,
+  isRecord,
   keepsDateStreak,
   describeRoutine,
   heatCells,
@@ -51,6 +53,7 @@ import {
   single,
   singleDays,
   streak,
+  typedGoal,
   weekdayKey,
 } from './lib'
 import type { Routine } from './lib'
@@ -119,6 +122,15 @@ const files = async ($: Engine) => {
 const writeRoutine = ($: Engine, routinePath: string, routine: Routine) =>
   $.fs.write(routinePath, `${JSON.stringify(routineToFile(routine), null, 2)}\n`)
 
+// Sets `routine`'s goals in routine.json and keeps the rest as written (goalsOverFile).
+// A file that is no JSON object any more is left alone: false.
+const writeGoals = async ($: Engine, routinePath: string, routine: Routine) => {
+  const raw: unknown = JSON.parse(await $.fs.read(routinePath))
+  if (!isRecord(raw)) return false
+  await $.fs.write(routinePath, `${JSON.stringify(goalsOverFile(raw, routine), null, 2)}\n`)
+  return true
+}
+
 const loadRoutine = async ($: Engine, routinePath: string): Promise<Routine> => {
   if (!(await $.fs.exists(routinePath))) {
     await writeRoutine($, routinePath, DEFAULT_ROUTINE)
@@ -186,16 +198,15 @@ const progress = async ($: Engine, date: string) => {
   if (to === undefined) return
   await freezePastDays($, routine)
   // Single days move; multi days, and any entry the reader left out, stay as the file has them.
-  const raw = JSON.parse(await $.fs.read(routinePath)) as Record<string, unknown>
-  const moved = routineToFile(moveGoal(singles, plan.exercise, plan.goal, to))
-  await $.fs.write(routinePath, `${JSON.stringify({ ...raw, ...moved }, null, 2)}\n`)
+  if (!(await writeGoals($, routinePath, moveGoal(singles, plan.exercise, plan.goal, to)))) return
   const unit = plan.unit ?? ''
   toast($, to > plan.goal
     ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
     : `${plan.exercise} back to ${to}${unit} after two short sessions. Rebuild.`)
 }
 
-const refreshToday = async ($: Engine): Promise<Today> => {
+// Today from disk, with its pace file: refreshPace needs both, and reads the file once.
+const readToday = async ($: Engine): Promise<{ t: Today; state: DayState }> => {
   const { routine, log: logDir } = await files($)
   const date = dayKey(await $.clock.now())
   await progress($, date)
@@ -203,8 +214,8 @@ const refreshToday = async ($: Engine): Promise<Today> => {
     (await readSwap($, logDir, date)) ?? (await loadRoutine($, routine))[weekdayKey(await $.clock.now())]
   const plans = plansOf(day)
   const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
-  // Only a multi day has a choice of exercise for a bare /fit to log to.
-  const last = day?.isMulti === true ? (await readDayState($, date)).last : undefined
+  const state = await readDayState($, date)
+  const { last } = state
   const kind = day?.isMulti === true
     ? { isMulti: true as const, ...(day.name === undefined ? {} : { name: day.name }) }
     : { isMulti: false as const }
@@ -216,8 +227,10 @@ const refreshToday = async ($: Engine): Promise<Today> => {
     ...(last === undefined ? {} : { last }),
   }
   await update($, today, () => next)
-  return next
+  return { t: next, state }
 }
+
+const refreshToday = async ($: Engine): Promise<Today> => (await readToday($)).t
 
 const DAY_MS = 86_400_000
 
@@ -411,10 +424,9 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
   dueTimer?.cancel()
   dueTimer = undefined
   // Re-read today: the date may have rolled over, or the shell script logged reps.
-  const t = await refreshToday($)
+  const { t, state: day } = await readToday($)
   // The schedule paces one exercise: a multi day has none, so strict holds nothing on it.
   const paced = paceable(t)
-  const day = await readDayState($, t.date)
   const s = scheduleOf(day)
   const now = await $.clock.now()
   let next: Pace | null = null
@@ -546,13 +558,14 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   }
   const logPath = `${(await files($)).log}/${before.date}`
   // Another session's write still landing: writing over it would lose its counts.
-  if (isDamagedLog(await readLog($, logPath))) {
-    toast($, "Couldn't read today's log just now. Nothing logged; try again.")
+  const text = await readLog($, logPath)
+  if (isDamagedLog(text)) {
+    toast($, "Couldn't read today's log, so nothing was logged. If it stays this way, /fit reset starts today over at 0.")
     return before
   }
   const count = Math.max(0, change(was.count))
   const exercises = before.exercises.map((e, i) => (i === at ? { ...e, count } : e))
-  await $.fs.write(logPath, formatDayLog(exercises, before.isMulti))
+  await $.fs.write(logPath, formatDayLog(exercises, before.isMulti, text))
   // In the shared pace file, so a bare /fit in any session follows the last log.
   await writeDayState($, before.date, state => ({ ...state, last: was.exercise }))
 
@@ -608,12 +621,14 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
   return after
 }
 
-// `/fit reset`: every exercise today back to 0.
+// `/fit reset`: every exercise today back to 0, with no breather and no `last`. A log
+// still damaged after readLog's second read is written over on purpose: the way out.
 const resetDay = async ($: Engine) => {
   const t = await refreshToday($)
-  if (!t.isMulti) return logReps($, () => 0)
-  await $.fs.write(`${(await files($)).log}/${t.date}`, formatDayLog(t.exercises.map(e => ({ ...e, count: 0 })), true))
-  await endBreather($, t.date)
+  const logPath = `${(await files($)).log}/${t.date}`
+  await readLog($, logPath)
+  await $.fs.write(logPath, formatDayLog(t.exercises.map(e => ({ ...e, count: 0 })), t.isMulti))
+  await writeDayState($, t.date, ({ breather: _b, putOff: _p, last: _l, ...rest }) => rest)
   await refreshHistory($)
   await refreshPace($)
   return refreshToday($)
@@ -647,8 +662,8 @@ const syncFromDisk = async ($: Engine, isForced = false) => {
   return true
 }
 
-// The set the last nudge suggested, for the spinner.
-const nudged = { reps: 0, exercise: '' }
+// The set the last nudge suggested, for the spinner. Replaced whole, never changed field by field.
+let nudged = { reps: 0, exercise: '' }
 
 // Easy mode: a suggestion once a turn runs long, sized to the set that's due.
 // On pace or in a breather there's nothing owed, so nothing to suggest. A multi
@@ -660,8 +675,7 @@ const nudge = async ($: Engine) => {
   const e = [focusOf(t), ...t.exercises].find(entry => !isFinished(entry))
   if (e === undefined) return
   if (p !== null && (p.behind <= 0 || p.restUntil !== null)) return
-  nudged.reps = p === null ? setSizeOf(t, e) : Math.min(p.behind, p.setSize)
-  nudged.exercise = e.exercise
+  nudged = { reps: p === null ? setSizeOf(t, e) : Math.min(p.behind, p.setSize), exercise: e.exercise }
   if (nudged.reps <= 0) return
   await update($, isWaiting, () => true)
   toast($, `Your agent's mid-set. You next: ${nudged.reps} ${e.exercise}.`)
@@ -752,7 +766,9 @@ const finishOnboarding = async ($: Engine) => {
     const old = await loadRoutine($, routinePath)
     if (JSON.stringify(old) !== JSON.stringify(routine)) await freezePastDays($, old)
     if (p.hasRoutine) await $.fs.write(`${routinePath}.bak`, await $.fs.read(routinePath))
-    await writeRoutine($, routinePath, routine)
+    // Custom goals change goals alone, so the file keeps what the reader left out; a preset replaces it.
+    if (p.program === CUSTOM) await writeGoals($, routinePath, routine)
+    else await writeRoutine($, routinePath, routine)
   }
   await markIntroduced($)
   await refreshToday($)
@@ -1090,7 +1106,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const t = await read($, today)
     if (options.spinner === false || t === null || !(await read($, isWaiting))) return next(e)
-    return next({ ...e, props: { ...e.props, message: `${nudged.reps} ${nudged.exercise} while Claude works` } })
+    const { reps, exercise } = nudged
+    return next({ ...e, props: { ...e.props, message: `${reps} ${exercise} while Claude works` } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1171,12 +1188,16 @@ export const register: Register = (on, options) => {
       const rows = t.exercises.map(entry => {
         const steps = isFinished(entry) ? [] : repSteps(setSizeOf(t, entry))
         const color = progressColor(entry.count, entry.goal)
+        const text = `${line(entry)}${steps.length > 0 ? '  ' : ''}`
+        // The line gives up columns before the buttons do, as the single day's row does.
+        const room = Math.max(1, cols - buttonsWidth(steps.map(n => `+${n}${entry.unit}`)))
         return (
           <Box key={`row-${entry.exercise}`}>
-            <Text color={color} dimColor={color === undefined} wrap="truncate-end">
-              {line(entry)}
-              {steps.length > 0 ? '  ' : ''}
-            </Text>
+            <Box {...(cells(text) > room ? { width: room } : {})}>
+              <Text color={color} dimColor={color === undefined} wrap="truncate-end">
+                {text}
+              </Text>
+            </Box>
             {steps.map((n, i) => (
               <Box key={`${entry.exercise}-step${i}`}>
                 {i > 0 && <Text> </Text>}
@@ -1322,7 +1343,7 @@ export const register: Register = (on, options) => {
               key={`goal-${exercise}`}
               label={`${exercise} `}
               placeholder={String(goal)}
-              value={p.custom[exercise] ?? ''}
+              value={typedGoal(p.custom, exercise)}
               submitLabel="set"
               onInput={setGoal(exercise)}
               onSubmit={setGoal(exercise)}
