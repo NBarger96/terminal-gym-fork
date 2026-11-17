@@ -49,31 +49,49 @@ const asPlan = (raw: unknown): Plan | undefined => {
   return { ...rest, exercise: shown(raw.exercise).trim(), goal: raw.goal, ...(typeof unit === 'string' ? { unit: shown(unit) } : {}) }
 }
 
+// The reader reads this many entries of a day's list at most, so a huge routine.json costs no more than this.
+const MAX_ENTRIES = 50
+
+// One entry of a day's list, read after the names `seen` and the `kept` plans before it: its plan, or why it is left out.
+const readEntry = (entry: unknown, seen: ReadonlySet<string>, kept: number): { plan: Plan } | { name: string; why: string } => {
+  const name = isRecord(entry) && typeof entry.exercise === 'string' ? shown(entry.exercise).trim() : ''
+  const plan = asPlan(entry)
+  if (name === '') return { name, why: 'no name' }
+  if (plan === undefined || plan.goal <= 0) return { name, why: 'goal must be above 0' }
+  if (seen.has(normalName(name))) return { name, why: 'listed twice' }
+  if (kept >= MAX_EXERCISES) return { name, why: `over ${MAX_EXERCISES} exercises` }
+  return { plan }
+}
+
+// A day's list as the reader takes it: the plans, the indexes of the entries it kept, each entry
+// it left out, and how many entries past MAX_ENTRIES it never read.
+const readEntries = (entries: readonly unknown[]) => {
+  const seen = new Set<string>()
+  const plans: Plan[] = []
+  const kept: number[] = []
+  const left: { at: number; name: string; why: string }[] = []
+  entries.slice(0, MAX_ENTRIES).forEach((entry, at) => {
+    const read = readEntry(entry, seen, plans.length)
+    if ('why' in read) {
+      left.push({ at, ...read })
+      return
+    }
+    seen.add(normalName(read.plan.exercise))
+    plans.push(read.plan)
+    kept.push(at)
+  })
+  return { plans, kept, left, unread: Math.max(0, entries.length - MAX_ENTRIES) }
+}
+
 // One routine day from its file form. `dropped` names each entry left out, for
 // the toast; `day` is undefined when nothing usable is left.
 export const parseRoutineDay = (raw: unknown, where = ''): { day?: RoutineDay; dropped: string[] } => {
   const at = where === '' ? '' : `${where} `
   if (isRecord(raw) && 'exercises' in raw) {
     if (!Array.isArray(raw.exercises)) return { dropped: [`${at}(exercises is not a list)`] }
-    const dropped: string[] = []
-    const seen = new Set<string>()
-    const plans: Plan[] = []
-    for (const [i, entry] of raw.exercises.entries()) {
-      const name = isRecord(entry) && typeof entry.exercise === 'string' ? shown(entry.exercise).trim() : ''
-      const plan = asPlan(entry)
-      const why =
-        name === '' ? 'no name'
-        : plan === undefined || plan.goal <= 0 ? 'goal must be above 0'
-        : seen.has(normalName(name)) ? 'listed twice'
-        : plans.length >= MAX_EXERCISES ? `over ${MAX_EXERCISES} exercises`
-        : undefined
-      if (why !== undefined || plan === undefined) {
-        dropped.push(`${at}${name === '' ? `#${i + 1}` : name} (${why})`)
-        continue
-      }
-      seen.add(normalName(name))
-      plans.push({ ...plan, exercise: name })
-    }
+    const { plans, left, unread } = readEntries(raw.exercises)
+    const dropped = left.map(({ at: i, name, why }) => `${at}${name === '' ? `#${i + 1}` : name} (${why})`)
+    if (unread > 0) dropped.push(`${at}(${unread} more entries past the first ${MAX_ENTRIES}, not read)`)
     const named = typeof raw.name === 'string' ? shown(raw.name).trim() : ''
     const name = named === '' ? undefined : named
     return { ...(plans.length === 0 ? {} : { day: { isMulti: true, ...(name === undefined ? {} : { name }), plans } }), dropped }
@@ -95,8 +113,14 @@ export const parseRoutine = (raw: unknown): { routine: Routine; dropped: string[
   return { routine, dropped }
 }
 
+// The toast names this many left-out entries, then counts the rest.
+const TOAST_NAMES = 5
+
 // The one toast for a routine with entries left out.
-export const droppedText = (dropped: readonly string[]) => `routine.json: left out ${dropped.join(', ')}.`
+export const droppedText = (dropped: readonly string[]) => {
+  const more = dropped.length - TOAST_NAMES
+  return `routine.json: left out ${dropped.slice(0, TOAST_NAMES).join(', ')}${more > 0 ? ` and ${more} more` : ''}.`
+}
 
 // The counts of a multi day's log, or undefined when it is not a whole JSON
 // object: another session may be mid-write.
@@ -543,16 +567,12 @@ const PLAN_FIELDS = ['exercise', 'goal', 'unit']
 const otherFields = (raw: unknown, typed: readonly string[]) =>
   isRecord(raw) ? Object.fromEntries(Object.entries(raw).filter(([key]) => !typed.includes(key))) : {}
 
-const planCount = (exercises: readonly unknown[]) => parseRoutineDay({ exercises }).day?.plans.length ?? 0
-
-// Which entries the reader keeps is the parser's call, so a rewrite asks it rather than repeat its rules.
+// Which entries the reader keeps is the reader's call, so a rewrite asks it rather than repeat its rules.
 const keptAndLeft = (rawDay: unknown) => {
   if (!isRecord(rawDay) || !Array.isArray(rawDay.exercises)) return { kept: asPlan(rawDay) === undefined ? [] : [rawDay], left: [] }
   const entries: unknown[] = rawDay.exercises
-  const kept: unknown[] = []
-  const left: unknown[] = []
-  entries.forEach((entry, i) => (planCount(entries.slice(0, i + 1)) > planCount(entries.slice(0, i)) ? kept : left).push(entry))
-  return { kept, left }
+  const isKept = new Set(readEntries(entries).kept)
+  return { kept: entries.filter((_, i) => isKept.has(i)), left: entries.filter((_, i) => !isKept.has(i)) }
 }
 
 // A retyped day over the day routine.json holds: each exercise keeps its entry's other fields, a multi
@@ -565,9 +585,12 @@ const dayOverFile = (rawDay: unknown, day: RoutineDay) => {
   }))
   const plans = day.plans.map(plan => ({ ...plan, ...otherFields(byName.get(normalName(plan.exercise)), PLAN_FIELDS) }))
   if (!isMultiDay(day)) return plans[0] ?? NO_PLAN
+  // Read after the plans, and after each entry kept back before it, which the reader leaves out and so
+  // changes nothing: an entry stays while the reader would leave it out there, or never reach it.
+  const seen = new Set(plans.map(plan => normalName(plan.exercise)))
   const exercises: unknown[] = [...plans]
   for (const entry of left) {
-    if (planCount([...exercises, entry]) === plans.length) exercises.push(entry)
+    if (exercises.length >= MAX_ENTRIES || 'why' in readEntry(entry, seen, plans.length)) exercises.push(entry)
   }
   const own = isRecord(rawDay) && Array.isArray(rawDay.exercises) ? otherFields(rawDay, ['name', 'exercises']) : {}
   return { ...(day.name === undefined ? {} : { name: day.name }), ...own, exercises }

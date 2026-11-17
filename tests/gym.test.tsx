@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, droppedText, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
 
 // A routine as routine.json would hold it, read into the shape the helpers take.
 const asRoutine = (raw: object) => parseRoutine(raw).routine
@@ -2015,6 +2015,25 @@ describe('multi days', () => {
       'wed x (goal must be above 0)',
       'thu (exercises is not a list)',
     ])
+  })
+
+  test('a day list is read only so far, and the toast names the first few left out, then counts the rest', () => {
+    const many = Array.from({ length: 1000 }, (_, i) => ({ exercise: `x${i}`, goal: 0 }))
+    const raw = { mon: { exercises: [{ exercise: 'dips', goal: 100 }, ...many] } }
+    const { routine, dropped } = parseRoutine(raw)
+    expect(routine.mon?.plans.map(plan => plan.exercise)).toEqual(['dips'])
+    // 49 entries read and left out, then one line for the 951 never read.
+    expect(dropped.length).toBe(50)
+    expect(dropped.at(-1)).toBe('mon (951 more entries past the first 50, not read)')
+    const firstFive = [0, 1, 2, 3, 4].map(i => `mon x${i} (goal must be above 0)`).join(', ')
+    expect(droppedText(dropped)).toBe(`routine.json: left out ${firstFive} and 45 more.`)
+    expect(droppedText(dropped.slice(0, 2))).toBe('routine.json: left out mon x0 (goal must be above 0), mon x1 (goal must be above 0).')
+    // A retyped day keeps every entry the reader left out, read or not.
+    const typed = customDays(routine, { mon: '120 dips, 10 squats' })
+    expect('routine' in typed).toBe(true)
+    if (!('routine' in typed)) return
+    const written = daysOverFile(raw, typed.routine, routine) as { mon: { exercises: unknown[] } }
+    expect(written.mon.exercises).toEqual([{ exercise: 'dips', goal: 120 }, { exercise: 'squats', goal: 10 }, ...many])
   })
 
   test('names lose bidi controls and zero-width characters too', () => {
