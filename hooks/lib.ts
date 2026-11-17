@@ -263,9 +263,10 @@ export type FitCommand =
   | { kind: 'strict'; isOn: boolean }
   | { kind: 'progress'; isOn: boolean }
   // `typedName`: what was typed after the number, all or the start of a name; absent, a bare /fit's target.
-  | { kind: 'add'; n: number; typedName?: string }
-  | { kind: 'set'; n: number; typedName?: string }
-  | { kind: 'goal'; n: number; typedName?: string }
+  // `isSeconds`: the number had an `s` (`300s`), so it fits only an exercise timed in seconds.
+  | { kind: 'add'; n: number; isSeconds?: true; typedName?: string }
+  | { kind: 'set'; n: number; isSeconds?: true; typedName?: string }
+  | { kind: 'goal'; n: number; isSeconds?: true; typedName?: string }
   // null: back to the configured window from the first prompt.
   | { kind: 'window'; hours: number | null }
   | { kind: 'window-until'; hour: number; minute: number }
@@ -275,13 +276,27 @@ export type FitCommand =
 // How long a set can be put off, and how often.
 export const SNOOZE = { defaultMinutes: 30, maxMinutes: 60, perDay: 2 } as const
 
-const USAGE = 'usage: /fit [<n> [exercise] | set <n> [exercise] | reset | goal <n> [exercise] | window <hours>|<hhmm>|off | snooze [minutes] | swap [day | exercise | out in] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]'
+const USAGE = 'usage: /fit [<n> [exercise] | set <n> [exercise] | reset | goal <n> [exercise] | window <hours>|<hhmm>|off | snooze [minutes] | swap [day | exercise | out in] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]; <n>s is seconds, like /fit 30s plank'
 
 // The name typed after `/fit 20` or `/fit set 80`: names may be several words ("jumping jacks").
 const namedAfter = (args: string, words: number) => {
   const name = normalName(args.trim().split(/\s+/).slice(words).join(' '))
   return name === '' ? {} : { typedName: name }
 }
+
+// A number as /fit takes it: digits, a sign only where `isSigned`, then `s` in either case for seconds.
+const countOf = (text: string | undefined, isSigned = false) => {
+  const match = text === undefined ? null : (isSigned ? /^(-?\d+)(s?)$/i : /^(\d+)(s?)$/i).exec(text)
+  if (match === null) return undefined
+  return { n: Number(match[1]), ...(match[2] === '' ? {} : { isSeconds: true as const }) }
+}
+
+// An exercise measured in seconds, which a count typed with `s` fits.
+export const isTimed = (unit: string | undefined) => unit?.trim().toLowerCase() === 's'
+
+// Why a count typed with `s` did nothing to an exercise measured otherwise.
+export const notTimedText = (exercise: string, unit: string | undefined, outcome: string) =>
+  `${exercise} is counted in ${unit === undefined || unit.trim() === '' ? 'reps' : unit}, so ${outcome}.`
 
 export const parseFit = (args: string): FitCommand => {
   const [head = '', value] = args.trim().split(/\s+/)
@@ -305,13 +320,15 @@ export const parseFit = (args: string): FitCommand => {
   if (head === 'easy') return { kind: 'strict', isOn: false }
   if (head === 'progress') return { kind: 'progress', isOn: value !== 'off' }
   if (head === 'set') {
-    return value !== undefined && /^\d+$/.test(value)
-      ? { kind: 'set', n: Number(value), ...namedAfter(args, 2) }
+    const count = countOf(value)
+    return count !== undefined
+      ? { kind: 'set', ...count, ...namedAfter(args, 2) }
       : { kind: 'error', text: 'fit: set needs a number' }
   }
   if (head === 'goal') {
-    return value !== undefined && /^\d+$/.test(value) && Number(value) > 0
-      ? { kind: 'goal', n: Number(value), ...namedAfter(args, 2) }
+    const count = countOf(value)
+    return count !== undefined && count.n > 0
+      ? { kind: 'goal', ...count, ...namedAfter(args, 2) }
       : { kind: 'error', text: 'fit: goal needs a number of reps, like /fit goal 60' }
   }
   if (head === 'window') {
@@ -338,7 +355,8 @@ export const parseFit = (args: string): FitCommand => {
       ? { kind: 'snooze', minutes }
       : { kind: 'error', text: `fit: snooze takes minutes from now, up to ${SNOOZE.maxMinutes}, like /fit snooze 30` }
   }
-  if (/^-?\d+$/.test(head)) return { kind: 'add', n: Number(head), ...namedAfter(args, 1) }
+  const count = countOf(head, true)
+  if (count !== undefined) return { kind: 'add', ...count, ...namedAfter(args, 1) }
   return { kind: 'error', text: USAGE }
 }
 
@@ -1012,6 +1030,7 @@ When a turn runs long, drop and do a set.
 
 ### Log a set
 \`/fit 20\` adds 20 reps, \`/fit 20 dips\` adds them to dips
+\`/fit 30s plank\` adds 30 seconds to a timed exercise (\`set\` and \`goal\` take \`s\` too)
 or press a **+** button above the prompt (sized to your set)
 
 ### Commands

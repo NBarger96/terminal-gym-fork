@@ -54,6 +54,8 @@ import {
   swappedLog,
   goalPick,
   couldBeText,
+  isTimed,
+  notTimedText,
   progressColor,
   progressesAt,
   repSteps,
@@ -1041,6 +1043,11 @@ export const register: Register = (on, options) => {
           if (match.kind === 'none') return { text: `No ${cmd.typedName} today, so nothing logged. Today: ${names.join(', ')}.` }
           exercise = names[match.index]
         }
+        // Seconds go only to an exercise timed in them: the one named, or a bare /fit's target.
+        const target = exercise === undefined ? focusOf(before) : before.exercises.find(e => e.exercise === exercise)
+        if (cmd.isSeconds === true && target !== undefined && !isTimed(target.unit)) {
+          return { text: notTimedText(target.exercise, target.unit, 'nothing logged') }
+        }
         const n = cmd.n
         const { t, refused } = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
         // A damaged log, or the plan changed under the command: nothing logged, so no count line.
@@ -1107,6 +1114,7 @@ export const register: Register = (on, options) => {
         if (before.isRest) return { text: "Today's a rest day. /fit rest off to train." }
         const pick = goalPick(await dayOf($, before.date), cmd.n, cmd.typedName)
         if (pick.kind === 'refuse') return { text: pick.text }
+        if (cmd.isSeconds === true && !isTimed(pick.plan.unit)) return { text: notTimedText(pick.plan.exercise, pick.plan.unit, 'no goal changed') }
         await writeSwap($, before.date, pick.day)
         await refreshHistory($)
         const after = await refreshToday($)

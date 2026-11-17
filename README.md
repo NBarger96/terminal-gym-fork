@@ -132,6 +132,7 @@ Every Claude Code session reads the same log in `~/.claude/fitness`, so a set yo
 | `/fit` | today's progress, pace and streak |
 | `/fit 20` | log 20 reps |
 | `/fit 20 dips` | log 20 to the exercise named (any case, or the start of its name); a name not on today's plan logs nothing |
+| `/fit 30s plank` | log 30 seconds to a timed exercise; `set` and `goal` take `s` too (`/fit goal 120s plank`). Seconds for an exercise counted in reps change nothing, and the reply says so |
 | `/fit set 80 [exercise]` | fix today's count (on a multi day, the exercise named, or the one logged last) |
 | `/fit reset` | today back to 0 |
 | `/fit goal 60 [exercise]` | change today's goal (your routine stays as it is); on a multi day, name the exercise |

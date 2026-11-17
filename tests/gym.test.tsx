@@ -3149,6 +3149,83 @@ describe('multi days', () => {
     expect(await ui.find({ type: 'Markdown', text: /`\/fit swap dips situps`[\s\S]*`\/fit swap arms day`[\s\S]*`\/fit goal 60 dips`/ })).toBeDefined()
     await ui.unmount()
   })
+
+  // A count typed with `s`, as a Custom days line takes `180s plank`.
+  const LEGS = { name: 'legs', exercises: [{ exercise: 'squats', goal: 100 }, { exercise: 'wall sit', goal: 600, unit: 's' }] }
+  const legsMonday = () => new Map<string, string>([[ROUTINE, JSON.stringify({ mon: LEGS })]])
+
+  test('/fit, set and goal take a count with s for seconds', () => {
+    expect(parseFit('300s wall sit')).toEqual({ kind: 'add', n: 300, isSeconds: true, typedName: 'wall sit' })
+    expect(parseFit('300S')).toEqual({ kind: 'add', n: 300, isSeconds: true })
+    expect(parseFit('-30s plank')).toEqual({ kind: 'add', n: -30, isSeconds: true, typedName: 'plank' })
+    expect(parseFit('300 wall sit')).toEqual({ kind: 'add', n: 300, typedName: 'wall sit' })
+    expect(parseFit('set 90s plank')).toEqual({ kind: 'set', n: 90, isSeconds: true, typedName: 'plank' })
+    expect(parseFit('goal 120S plank')).toEqual({ kind: 'goal', n: 120, isSeconds: true, typedName: 'plank' })
+    expect(parseFit('goal 0s').kind).toBe('error')
+    expect(parseFit('set -5s').kind).toBe('error')
+    expect(parseFit('30ss').kind).toBe('error')
+    expect(parseFit('s').kind).toBe('error')
+  })
+
+  test('/fit 300s wall sit logs seconds to a timed exercise of several words, as /fit 300 wall sit does', async ($, on) => {
+    const { files } = multiWorld(on, legsMonday())
+    await start($)
+    expect((await fit($, '300s wall sit')).text).toContain('300/600s wall sit')
+    expect((await fit($, '300 wall sit')).text).toContain('600/600s wall sit')
+    expect(files.get(TODAY_LOG)).toBe('{"squats":0,"wall sit":600}\n')
+    expect(dayState(files).last).toBe('wall sit')
+  })
+
+  test('a bare /fit 30s logs to the exercise logged last, and a negative one takes seconds off', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday())
+    await start($)
+    await fit($, '5 plank')
+    expect((await fit($, '30s')).text).toContain('35/180s plank')
+    expect((await fit($, '-10S plank')).text).toContain('25/180s plank')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":0,"pushups":0,"plank":25}\n')
+  })
+
+  test('seconds for an exercise counted in reps log nothing and say why', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":10,"pushups":0,"plank":0}\n']]))
+    await start($)
+    expect((await fit($, '20s dips')).text).toBe('dips is counted in reps, so nothing logged.')
+    expect((await fit($, 'set 20s dips')).text).toBe('dips is counted in reps, so nothing logged.')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":10,"pushups":0,"plank":0}\n')
+    expect(dayState(files).last).toBeUndefined()
+    // A bare one goes by its target: dips, logged last.
+    await fit($, '5 dips')
+    expect((await fit($, '30s')).text).toBe('dips is counted in reps, so nothing logged.')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":15,"pushups":0,"plank":0}\n')
+  })
+
+  test('/fit set and /fit goal with s act on a timed exercise and refuse one counted in reps', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":10,"pushups":0,"plank":30}\n']]))
+    await start($)
+    expect((await fit($, 'set 90s plank')).text).toContain('90/180s plank')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":10,"pushups":0,"plank":90}\n')
+    expect((await fit($, 'goal 60s dips')).text).toBe('dips is counted in reps, so no goal changed.')
+    expect(files.has(`${TODAY_LOG}.swap`)).toBe(false)
+    expect((await fit($, 'goal 120s plank')).text).toContain("Today's goal is 120s plank.")
+    expect(swapFile(files)).toEqual({ ...ARMS, exercises: [...ARMS.exercises.slice(0, 2), { exercise: 'plank', goal: 120, unit: 's' }] })
+  })
+
+  test('a single day counted in reps refuses seconds', async ($, on) => {
+    const { files } = multiWorld(on, new Map())
+    await start($)
+    expect((await fit($, '30s')).text).toBe('pushups is counted in reps, so nothing logged.')
+    expect((await fit($, 'goal 60s')).text).toBe('pushups is counted in reps, so no goal changed.')
+    expect(files.has(TODAY_LOG)).toBe(false)
+  })
+
+  test('/fit help and the usage name the seconds form', async ($, on) => {
+    multiWorld(on, new Map())
+    await start($)
+    expect((await fit($, 'score')).text).toContain('30s plank')
+    await fit($, 'help')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-help' })
+    expect(await ui.find({ type: 'Markdown', text: /### Log a set\n[^\n]*\n`\/fit 30s plank` adds 30 seconds/ })).toBeDefined()
+    await ui.unmount()
+  })
 })
 
 describe('custom days', () => {
