@@ -2941,6 +2941,9 @@ describe('multi days', () => {
     await fit($, 'help')
     const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-help' })
     expect(await ui.find({ type: 'Markdown', text: /`\/fit 20 dips` logs to dips[\s\S]*`\/fit set 80 dips` fixes one exercise/ })).toBeDefined()
+    // The named forms are in "Log a set" and the Commands table too, not only the multi-day list.
+    expect(await ui.find({ type: 'Markdown', text: /### Log a set\n`\/fit 20` adds 20 reps, `\/fit 20 dips` adds them to dips/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /\| `\/fit 20 \[exercise\]` \|[\s\S]*\| `\/fit set 80 \[exercise\]` \|[\s\S]*\| `\/fit goal 60 \[exercise\]` \|/ })).toBeDefined()
     await ui.unmount()
   })
 

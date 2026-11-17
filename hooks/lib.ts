@@ -1010,16 +1010,17 @@ export const HELP = `## Help
 When a turn runs long, drop and do a set.
 
 ### Log a set
-\`/fit 20\` adds 20 reps
+\`/fit 20\` adds 20 reps, \`/fit 20 dips\` adds them to dips
 or press a **+** button above the prompt (sized to your set)
 
 ### Commands
 | Command | Does |
 |---|---|
 | \`/fit\` | today's progress |
+| \`/fit 20 [exercise]\` | log a set (the exercise named, or the one logged last) |
 | \`/fit set 80 [exercise]\` | fix today's count (the exercise named, or the one logged last) |
 | \`/fit reset\` | today back to 0 |
-| \`/fit goal 60 [exercise]\` | change today's goal |
+| \`/fit goal 60 [exercise]\` | change today's goal (the exercise named; a multi day needs one) |
 | \`/fit window 3\` | finish today in the next 3h |
 | \`/fit snooze 30\` | put the due set off 30 min (twice a day) |
 | \`/fit swap [exercise or day]\` | switch today's exercise, or make today a day of your program |

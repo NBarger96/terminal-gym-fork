@@ -99,6 +99,15 @@ Strict mode paces a multi day as a whole, in percent of the day. Each exercise's
 
 `/fit reset` puts every exercise back to 0.
 
+### What changed for single days
+
+Multi-exercise days brought four changes that a one-exercise day sees too:
+
+- A name has to match today's exercise. `/fit 20 dips` on a pushups day logs nothing and the reply says what today is; `/fit goal 60 dips` there changes nothing. Before, the name was ignored and the reps went to pushups.
+- A set that takes you past the goal says so: *"💪 +10 pushups, done (110/100)."*
+- `/fit reset` always clears a breather or a `/fit snooze` running, even at 0, so the next set is due on the schedule. The count of snoozes taken today stays, so a reset never buys more of them.
+- `/fit swap` takes the start of a name, as `/fit 20 di` does: `/fit swap squ` swaps to squats when only one exercise starts that way, and a start that fits several swaps nothing and names them.
+
 ## The scoreboard
 
 `/fit streak` opens the scoreboard. `/fit streak 90` opens it on the last 90 days, from 2 to 365. The **7d**, **30d**, **90d** and **1y** buttons change the range, and the scoreboard keeps your choice for next time.
@@ -106,6 +115,7 @@ Strict mode paces a multi day as a whole, in percent of the day. Each exercise's
 - **All time** counts every day in `~/.claude/fitness/log`. Each exercise shows its total, a meter to the next milestone and its best day.
 - **The chart** shows every exercise on one timeline, with a bar a day while the days fit across the pane. A longer range shows a bar per week or more, stacked by exercise. Bar height is reps.
 - **The year grid** shows the past year, one column a week. It draws in the terminal only.
+- **The last week** lists each day with a bar and its count against the goal. A multi day takes one row per exercise, with the date on its first row.
 
 Each exercise keeps one color. Your first three logged exercises get gold, blue and pink. Later exercises share grey, because a fourth color can't stay distinct under color blindness, and their labels tell them apart. A bright bar or square means you hit the goal. A dim one means you fell short. On a multi day each exercise's part of the bar is bright or dim on its own, and its square on the year grid is bright only when every exercise hit.
 
@@ -152,7 +162,7 @@ In `/config`, under terminal-gym:
 | Strict mode | off | Hold typed prompts while you're behind pace |
 | Progressive goals | off | Raise an exercise's goal after you hit it, and lower it after two short sessions |
 | Training window | 8 hours | How long after your first prompt the day's sets are spread over |
-| Set size | auto | Reps per set; auto is a tenth of the goal, rounded to fives |
+| Set size | auto | Reps per set; auto is a tenth of the goal, rounded to fives. A multi day sizes each exercise's **+** buttons and nudges from that exercise's own goal, as auto does, since one size can't fit reps and seconds alike |
 | Long-turn nudges | on | Easy mode: suggest a set when a turn runs long |
 | Nudge after | 30 seconds | How long a turn runs before the nudge |
 | Reps per nudge | 10 | The set the nudge suggests |
