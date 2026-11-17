@@ -45,6 +45,9 @@ export type OnboardPick = {
   // Custom: the routine whose days it keeps, and each exercise's goal as typed.
   base: Record<string, RoutineDay>
   custom: Record<string, string>
+  // Custom days: each weekday's line as typed.
+  days: Record<string, string>
+  // A Next on Custom goals or Custom days found input that does not read.
   isCustomInvalid: boolean
 }
 
@@ -60,6 +63,8 @@ export type Pace = {
   isOpening?: boolean
   // The breather is a `/fit snooze`: the set was put off, not partly done.
   isPutOff?: boolean
+  // A multi day's pace is in percent of the day, so every text that prints its numbers adds this.
+  unit?: '%'
 }
 
 declare module 'claude-code' {

@@ -26,10 +26,6 @@ export const routineToFile = (routine: Routine) =>
 // Every plan in a routine, day by day, multi days' exercises in their order.
 export const allPlans = (routine: Routine) => Object.values(routine).flatMap(day => day.plans)
 
-// The routine's single days alone: what progressive goals move until they move multi days too.
-export const singleDays = (routine: Routine): Routine =>
-  Object.fromEntries(Object.entries(routine).filter(([, day]) => !isMultiDay(day)))
-
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
 export const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof raw === 'object' && raw !== null && !Array.isArray(raw)
@@ -471,6 +467,112 @@ export const parseCustom = (text: string): Routine | undefined => {
   return Number(goal) > 0 ? daily(exercise.toLowerCase(), Number(goal)) : undefined
 }
 
+// Monday first, as people read a week, with the name an error uses for its line.
+export const WEEK_LINES = [
+  ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday'],
+] as const
+
+const planLine = (plan: Plan) => `${plan.goal}${plan.unit ?? ''} ${plan.exercise}`
+
+// A day as its Custom days line, `[<name>:] <goal>[unit] <exercise>, ...`; no plan is an empty line.
+export const dayLine = (day: RoutineDay | undefined) =>
+  day === undefined ? '' : `${day.isMulti === true && day.name !== undefined ? `${day.name}: ` : ''}${day.plans.map(planLine).join(', ')}`
+
+// A Custom days line as a day: one exercise and no name is a single day, more or a name a multi day.
+// It goes through the routine reader, so a line and routine.json share one set of rules.
+export const parseDayLine = (line: string, units: readonly string[] = ['s']): { day: RoutineDay } | { error: string } => {
+  const text = shown(line).replace(/\s+/g, ' ')
+  // The last colon, so a day name may hold one.
+  const colon = text.lastIndexOf(':')
+  const name = colon < 0 ? '' : text.slice(0, colon).trim()
+  const parts = text.slice(colon + 1).split(',').map(part => part.trim()).filter(part => part !== '')
+  if (parts.length === 0) return { error: 'no exercise' }
+  const errors: string[] = []
+  const exercises = parts.flatMap(part => {
+    const match = /^(\d+)([a-z]*) (.+)$/i.exec(part)
+    const [, goal = '', typedUnit = '', exercise = ''] = match ?? []
+    const unit = units.find(known => known !== '' && known.toLowerCase() === typedUnit.toLowerCase())
+    const why =
+      match === null ? `"${part}" should read like 100 dips or 180s plank`
+      : typedUnit !== '' && unit === undefined ? `${exercise} (${typedUnit} is no unit; 180s is seconds)`
+      : !Number.isSafeInteger(Number(goal)) ? `${exercise} (goal too large)`
+      : undefined
+    if (why !== undefined) errors.push(why)
+    return why === undefined ? [{ exercise, goal: Number(goal), ...(unit === undefined ? {} : { unit }) }] : []
+  })
+  const read = parseRoutineDay({ ...(name === '' ? {} : { name }), exercises })
+  errors.push(...read.dropped)
+  const [first] = read.day?.plans ?? []
+  if (errors.length > 0 || read.day === undefined || first === undefined) return { error: errors.join('; ') }
+  return { day: name === '' && read.day.plans.length === 1 ? single(first) : read.day }
+}
+
+// The Custom days program, each weekday as its line reads, or each line that does not read, by weekday.
+// A line left at its prefill keeps its day, and an emptied line leaves its weekday with no plan.
+export const customDays = (base: Routine, lines: Record<string, string>): { routine: Routine } | { errors: string[] } => {
+  const routine: Routine = { ...base }
+  const errors: string[] = []
+  // A unit routine.json already uses reads too, so its days' lines read back.
+  const units = [...new Set(['s', ...allPlans(base).flatMap(plan => (plan.unit === undefined ? [] : [plan.unit]))])]
+  for (const [weekday, label] of WEEK_LINES) {
+    const line = (Object.hasOwn(lines, weekday) ? (lines[weekday] ?? '') : '').trim()
+    if (line === dayLine(base[weekday]).trim()) continue
+    if (line === '') {
+      delete routine[weekday]
+      continue
+    }
+    const read = parseDayLine(line, units)
+    if ('error' in read) errors.push(`${label}: ${read.error}`)
+    else routine[weekday] = read.day
+  }
+  return errors.length > 0 ? { errors } : { routine }
+}
+
+const PLAN_FIELDS = ['exercise', 'goal', 'unit']
+
+// Fields a line cannot type (a `cue`, say) are the person's own, so a retyped day carries them over.
+const otherFields = (raw: unknown, typed: readonly string[]) =>
+  isRecord(raw) ? Object.fromEntries(Object.entries(raw).filter(([key]) => !typed.includes(key))) : {}
+
+const planCount = (exercises: readonly unknown[]) => parseRoutineDay({ exercises }).day?.plans.length ?? 0
+
+// Which entries the reader keeps is the parser's call, so a rewrite asks it rather than repeat its rules.
+const keptAndLeft = (rawDay: unknown) => {
+  if (!isRecord(rawDay) || !Array.isArray(rawDay.exercises)) return { kept: asPlan(rawDay) === undefined ? [] : [rawDay], left: [] }
+  const entries: unknown[] = rawDay.exercises
+  const kept: unknown[] = []
+  const left: unknown[] = []
+  entries.forEach((entry, i) => (planCount(entries.slice(0, i + 1)) > planCount(entries.slice(0, i)) ? kept : left).push(entry))
+  return { kept, left }
+}
+
+// A retyped day over the day routine.json holds: each exercise keeps its entry's other fields, a multi
+// day its own, and an entry the reader left out stays while it would still be left out.
+const dayOverFile = (rawDay: unknown, day: RoutineDay) => {
+  const { kept, left } = keptAndLeft(rawDay)
+  const byName = new Map(kept.flatMap(entry => {
+    const plan = asPlan(entry)
+    return plan === undefined ? [] : [[plan.exercise.trim().toLowerCase(), entry] as const]
+  }))
+  const plans = day.plans.map(plan => ({ ...plan, ...otherFields(byName.get(plan.exercise.toLowerCase()), PLAN_FIELDS) }))
+  if (!isMultiDay(day)) return plans[0] ?? NO_PLAN
+  const exercises: unknown[] = [...plans]
+  for (const entry of left) {
+    if (planCount([...exercises, entry]) === plans.length) exercises.push(entry)
+  }
+  const own = isRecord(rawDay) && Array.isArray(rawDay.exercises) ? otherFields(rawDay, ['name', 'exercises']) : {}
+  return { ...(day.name === undefined ? {} : { name: day.name }), ...own, exercises }
+}
+
+// routine.json's contents with each day of `routine` that differs from `base` written over it, and each
+// day `routine` dropped taken out; the days left as they were, other keys and the rest stay as written.
+export const daysOverFile = (raw: Record<string, unknown>, routine: Routine, base: Routine): Record<string, unknown> => ({
+  ...Object.fromEntries(Object.entries(raw).filter(([key]) => !Object.hasOwn(base, key) || Object.hasOwn(routine, key))),
+  ...Object.fromEntries(Object.entries(routine)
+    .filter(([weekday, day]) => JSON.stringify(day) !== JSON.stringify(base[weekday]))
+    .map(([weekday, day]) => [weekday, dayOverFile(raw[weekday], day)])),
+})
+
 // A goal's step: a twentieth (5%) in fives, at least 5.
 export const stepFor = (goal: number) => Math.max(5, Math.round(goal / 20 / 5) * 5)
 
@@ -494,6 +596,10 @@ export const nextGoal = (goal: number, past: readonly Day[]) => {
 // so neither is the last session of the other.
 export const canProgress = (routine: Routine, exercise: string) =>
   new Set(allPlans(routine).filter(plan => plan.exercise === exercise).map(plan => plan.goal)).size === 1
+
+// Whether a session at `goal` moves the exercise on: the routine's one goal for it, not a goal of its own.
+export const progressesAt = (routine: Routine, exercise: string, goal: number) =>
+  canProgress(routine, exercise) && allPlans(routine).some(plan => plan.exercise === exercise && plan.goal === goal)
 
 // The routine with an exercise's goal moved: only the days at the old goal, so
 // days a custom program set apart keep theirs.
@@ -727,12 +833,45 @@ export const paceAt = (
 export const breatherMs = (goal: number, setSize: number, windowMs: number) =>
   goal <= 0 || setSize <= 0 ? 0 : setGap(goal, setSize, windowMs) / 2
 
-// Fewer reps than the band's smallest button earn their share of the breather:
-// 2 of a 5-rep button, two fifths. A full button or more earns it all.
-export const earnedBreatherMs = (added: number, goal: number, setSize: number, windowMs: number) => {
+// Fewer reps than the band's smallest button (`smallest`; a multi day passes its exercise's own)
+// earn their share of the breather: 2 of a 5-rep button, two fifths. A full button or more earns it all.
+export const earnedBreatherMs = (added: number, goal: number, setSize: number, windowMs: number, smallest = repSteps(setSize)[0] ?? setSize) => {
   if (added <= 0) return 0
-  const smallest = repSteps(setSize)[0] ?? setSize
   return breatherMs(goal, setSize, windowMs) * Math.min(1, added / Math.max(1, smallest))
+}
+
+// Percent, so reps and seconds add up on one schedule; a set is the tenth a single day's default is.
+const MULTI_PACE = { goal: 100, setSize: 10 } as const
+
+// A count against its goal: what the share and the set ideas read.
+type Tally = { count: number; goal: number }
+
+// What the set schedule paces, in the units its numbers are in.
+export type PaceScale = { goal: number; count: number; setSize: number }
+
+// Capped so extra dips never cover a skipped plank; whole percent so a due share reads
+// cleanly. The nudge keeps a float like 9.999… from flooring a full tenth to 9.
+export const dayShare = (exercises: readonly Tally[]) => {
+  if (exercises.length === 0) return 0
+  const shares = exercises.reduce((sum, e) => sum + (e.goal > 0 ? Math.min(1, Math.max(0, e.count) / e.goal) : 1), 0)
+  return Math.floor((shares / exercises.length) * MULTI_PACE.goal + 1e-9)
+}
+
+// One schedule for both kinds of day: a multi day's exercises can't share a rep count,
+// so it is paced by its share instead. A day with no exercise has nothing to pace.
+export const paceScale = (day: { isMulti: boolean; exercises: readonly Tally[] }, setSetting: number): PaceScale => {
+  if (day.isMulti) return { goal: MULTI_PACE.goal, count: dayShare(day.exercises), setSize: MULTI_PACE.setSize }
+  const goal = day.exercises[0]?.goal ?? 0
+  return { goal, count: day.exercises[0]?.count ?? 0, setSize: setSizeFor(goal, setSetting) }
+}
+
+// A due share is no exercise a person can do, so it is offered as real sets, the one
+// logged last first: each the share a set is of the day, of that exercise's goal, never past it.
+export const setIdeas = <E extends Tally & { exercise: string }>(exercises: readonly E[], last: string | undefined) => {
+  const open = exercises.filter(e => e.goal > 0 && e.count < e.goal)
+  const lead = open.find(e => e.exercise === last) ?? open[0]
+  const ordered = lead === undefined ? [] : [lead, ...open.filter(e => e !== lead)]
+  return ordered.map(e => ({ ...e, amount: Math.min(Math.ceil((e.goal * MULTI_PACE.setSize) / MULTI_PACE.goal), e.goal - e.count) }))
 }
 
 // Time left, rounded up to the minute: "23m", "1h", "1h 5m".
@@ -761,7 +900,7 @@ export const cheer = (added: number, count: number, goal: number, exercise: stri
 }
 
 export const describeRoutine = (routine: Routine) =>
-  [...new Set(allPlans(routine).map(p => `${p.goal}${p.unit ?? ''} ${p.exercise}`))].join(' / ')
+  [...new Set(allPlans(routine).map(planLine))].join(' / ')
 
 export const HELP = `## Help
 
@@ -812,6 +951,7 @@ Off by default. When it's on:
 ### Multi-exercise days
 A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each with its own goal:
 \`"tue": { "name": "Arms day", "exercises": [ { "exercise": "dips", "goal": 100 }, { "exercise": "plank", "goal": 180, "unit": "s" } ] }\`
+- or type them in \`/fit program\` under **Custom days**, a line per weekday: \`arms: 100 dips, 100 pushups, 180s plank\` (a name, then goals, \`s\` for seconds); \`30 burpees\` is a one-exercise day, and an empty line no plan
 - the band shows the day's name, pace and streak, then a row per exercise with its own bar and **+** buttons (seconds for a timed one)
 - a **+** logs to its row; \`/fit 20\` logs to the exercise you logged last, or the first
 - \`/fit 20 dips\` logs to dips: any case, or the start of a name (\`/fit 20 di\`) when only one exercise starts that way
@@ -822,7 +962,9 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - \`/fit swap dips situps\` puts situps in place of dips today, and dips' count carries over
 - \`/fit swap arms day\` makes today the day named Arms day, keeping counts for exercises on both; a day's name wins over an exercise's
 - \`/fit goal 60 dips\` changes dips' goal for today only; a bare \`/fit goal 60\` asks which exercise
-- not yet on a multi day: \`/fit window\`, \`/fit snooze\`, strict holds and progressive goals
+- in strict mode a multi day is paced as a whole: each exercise's share of its goal, capped at 100%, averaged, in 10 sets of 10%; extra dips never cover a skipped plank
+- a due set suggests a tenth of an exercise's goal, the one you logged last first: "10% of arms, e.g. 10 dips or 18s plank"; breathers, \`/fit snooze\` and \`/fit window\` work in those percent
+- with progressive goals on, each exercise's goal moves on its own sessions
 
 ### Your data
 Stays on this machine, in \`~/.claude/fitness\`.`
