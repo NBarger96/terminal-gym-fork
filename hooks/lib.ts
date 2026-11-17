@@ -501,30 +501,62 @@ export const WEEK_LINES = [
   ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday'],
 ] as const
 
-const planLine = (plan: Plan) => `${plan.goal}${plan.unit ?? ''} ${plan.exercise}`
+// A name holding a `,`, `:` or `"` would split a line where it should not, so the line puts it in
+// double quotes, a `"` in it doubled: `20 "push, ups"`.
+const quoted = (name: string) => (/[,:"]/.test(name) ? `"${name.replace(/"/g, '""')}"` : name)
+
+// A name as a line holds it, quotes taken off.
+const unquoted = (text: string) => {
+  const match = /^"(.*)"$/.exec(text.trim())
+  return match === null ? text.trim() : (match[1] ?? '').replace(/""/g, '"')
+}
+
+const planLine = (plan: Plan) => `${plan.goal}${plan.unit ?? ''} ${quoted(plan.exercise)}`
 
 // A day as its Custom days line, `[<name>:] <goal>[unit] <exercise>, ...`; no plan is an empty line.
 export const dayLine = (day: RoutineDay | undefined) =>
-  day === undefined ? '' : `${day.isMulti === true && day.name !== undefined ? `${day.name}: ` : ''}${day.plans.map(planLine).join(', ')}`
+  day === undefined ? '' : `${day.isMulti === true && day.name !== undefined ? `${quoted(day.name)}: ` : ''}${day.plans.map(planLine).join(', ')}`
+
+// Where a line's `,` and `:` fall outside double quotes, and whether a quote is left open.
+const lineMarks = (text: string) => {
+  const colons: number[] = []
+  const commas: number[] = []
+  let isQuoted = false
+  // By UTF-16 index, as `slice` cuts: the three marks are never half of a pair.
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '"') isQuoted = !isQuoted
+    else if (!isQuoted && ch === ':') colons.push(i)
+    else if (!isQuoted && ch === ',') commas.push(i)
+  }
+  return { colons, commas, isOpen: isQuoted }
+}
+
+// A goal as a line types it: a number the routine could hold, decimals included, then its unit.
+const GOAL_PART = /^(\d+(?:\.\d+)?)(\S*) (.+)$/
 
 // A Custom days line as a day: one exercise and no name is a single day, more or a name a multi day.
 // It goes through the routine reader, so a line and routine.json share one set of rules.
 export const parseDayLine = (line: string, units: readonly string[] = ['s']): { day: RoutineDay } | { error: string } => {
   const text = shown(line).replace(/\s+/g, ' ')
-  // The last colon, so a day name may hold one.
-  const colon = text.lastIndexOf(':')
-  const name = colon < 0 ? '' : text.slice(0, colon).trim()
-  const parts = text.slice(colon + 1).split(',').map(part => part.trim()).filter(part => part !== '')
+  const { colons, commas, isOpen } = lineMarks(text)
+  if (isOpen) return { error: 'a " is not closed (a name holding , : or " goes in double quotes, with "" for a quote)' }
+  // The last colon outside quotes, so a day name may hold one.
+  const colon = colons[colons.length - 1] ?? -1
+  const name = colon < 0 ? '' : unquoted(text.slice(0, colon))
+  const cuts = [colon, ...commas.filter(at => at > colon), text.length]
+  const parts = cuts.slice(1).map((end, i) => text.slice((cuts[i] ?? 0) + 1, end).trim()).filter(part => part !== '')
   if (parts.length === 0) return { error: 'no exercise' }
   const errors: string[] = []
   const exercises = parts.flatMap(part => {
-    const match = /^(\d+)([a-z]*) (.+)$/i.exec(part)
-    const [, goal = '', typedUnit = '', exercise = ''] = match ?? []
+    const match = GOAL_PART.exec(part)
+    const [, goal = '', typedUnit = '', typedName = ''] = match ?? []
+    const exercise = unquoted(typedName)
     const unit = units.find(known => known !== '' && known.toLowerCase() === typedUnit.toLowerCase())
     const why =
       match === null ? `"${part}" should read like 100 dips or 180s plank`
       : typedUnit !== '' && unit === undefined ? `${exercise} (${typedUnit} is no unit; 180s is seconds)`
-      : !Number.isSafeInteger(Number(goal)) ? `${exercise} (goal too large)`
+      : !(Number(goal) <= Number.MAX_SAFE_INTEGER) ? `${exercise} (goal too large)`
       : undefined
     if (why !== undefined) errors.push(why)
     return why === undefined ? [{ exercise, goal: Number(goal), ...(unit === undefined ? {} : { unit }) }] : []

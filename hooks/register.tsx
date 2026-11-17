@@ -1527,8 +1527,10 @@ export const register: Register = (on, options) => {
           {p.isCustomInvalid && <Text color="#d75f5f">Every goal needs a whole number above 0.</Text>}
         </Box>
       )
+      // Once a Next has failed, the errors stay drawn and are read again from every line on each edit,
+      // so fixing one line clears its own error and leaves the other lines' errors in view.
       const setLine = (weekday: string) => (value: string) =>
-        void update($, onboardPick, now => ({ ...now, days: { ...now.days, [weekday]: value }, isCustomInvalid: false }))
+        void update($, onboardPick, now => ({ ...now, days: { ...now.days, [weekday]: value } }))
       const lines = Input !== undefined && p.program === CUSTOM_DAYS && (
         <Box flexDirection="column">
           <Text> </Text>
@@ -1557,7 +1559,7 @@ export const register: Register = (on, options) => {
               key={`program-${i}`}
               label={`${name === p.program ? '●' : '○'} ${name}`}
               plain
-              onPress={choose({ program: name })}
+              onPress={choose({ program: name, isCustomInvalid: false })}
             />
           ))}
           {fields}

@@ -3205,6 +3205,20 @@ describe('custom days', () => {
     for (const day of Object.values(days)) expect(parseDayLine(dayLine(day))).toEqual({ day })
   })
 
+  test('a day line quotes a name it cannot hold, and reads back decimal goals and the file\'s own units', () => {
+    const days = asRoutine({
+      mon: { name: 'Push, pull', exercises: [{ exercise: 'push, ups', goal: 2.5 }, { exercise: 'bar: hang', goal: 30, unit: 's' }, { exercise: '7" box jumps', goal: 10 }] },
+      tue: { exercise: 'run', goal: 5.5, unit: 'km/h' },
+    })
+    expect(dayLine(days.mon)).toBe('"Push, pull": 2.5 "push, ups", 30s "bar: hang", 10 "7"" box jumps"')
+    expect(dayLine(days.tue)).toBe('5.5km/h run')
+    for (const day of Object.values(days)) expect(parseDayLine(dayLine(day), ['s', 'km/h'])).toEqual({ day })
+    expect(parseDayLine('10 7" box jumps')).toEqual({ error: 'a " is not closed (a name holding , : or " goes in double quotes, with "" for a quote)' })
+    // A goal retyped on such a day reads, beside the rest of its line.
+    const typed = customDays(days, { mon: dayLine(days.mon).replace('2.5', '3'), tue: dayLine(days.tue) })
+    expect(typed).toEqual({ routine: { ...days, mon: { isMulti: true, name: 'Push, pull', plans: [{ exercise: 'push, ups', goal: 3 }, ...(days.mon?.plans.slice(1) ?? [])] } } })
+  })
+
   test('custom days name each wrong line by weekday, keep a line left as filled, and empty a cleared one', () => {
     // A multi day of one with no name prints as a single day's line; left as filled, it stays multi.
     const base = asRoutine({ mon: { exercises: [{ exercise: 'dips', goal: 100 }] }, tue: { exercise: 'dips', goal: 100 } })
@@ -3246,6 +3260,19 @@ describe('custom days', () => {
       tue: { name: 'Arms', cue: 'slow', exercises: [{ exercise: 'dips', goal: 120, cue: 'deep' }, { exercise: 'a', goal: 10 }, { exercise: 'b', goal: 10 }, { exercise: 'lunges', goal: 0 }] },
       wed: { exercises: [{ exercise: 'squats', goal: 300, cue: 'low' }, { exercise: 'lunges', goal: 50 }] },
     })
+  })
+
+  test('a repeat left out of a retyped day stays while its first is typed, and goes once the line takes that out', () => {
+    const raw = { mon: { exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'pushups', goal: 50 }, { exercise: 'dips', goal: 80, cue: 'x' }] } }
+    const base = asRoutine(raw)
+    const retyped = (line: string) => {
+      const typed = customDays(base, { mon: line })
+      expect(typed).toMatchObject({ routine: {} })
+      return daysOverFile(raw, 'routine' in typed ? typed.routine : base, base).mon
+    }
+    expect(retyped('100 dips, 20 squats')).toEqual({ exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'squats', goal: 20 }, { exercise: 'dips', goal: 80, cue: 'x' }] })
+    // With the first dips gone, the repeat would join the plan, so it goes.
+    expect(retyped('50 pushups, 20 squats')).toEqual({ exercises: [{ exercise: 'pushups', goal: 50 }, { exercise: 'squats', goal: 20 }] })
   })
 
   test('/fit program offers Custom days after the existing choices, each line filled from the routine', async ($, on) => {
@@ -3301,7 +3328,10 @@ describe('custom days', () => {
     expect(await ui.find({ type: 'Text', text: 'Friday: "lots of dips" should read like 100 dips or 180s plank' })).toBeDefined()
     expect(await ui.find({ key: 'finish' })).toBeUndefined()
     expect(files.get(ROUTINE)).toBe(before)
+    // Fixing one line clears its error and leaves the other line's in view.
     await ui.input({ key: 'day-tue', text: '100 dips, 50 pushups' })
+    expect(await ui.find({ type: 'Text', text: 'Tuesday: pushups (goal must be above 0)' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Friday: "lots of dips" should read like 100 dips or 180s plank' })).toBeDefined()
     await ui.input({ key: 'day-fri', text: '100 dips' })
     await finish(ui)
     expect(routineOf(files).tue).toEqual({ exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'pushups', goal: 50 }] })
