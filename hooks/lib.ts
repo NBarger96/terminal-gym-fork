@@ -30,8 +30,15 @@ const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
 export const isRecord = (raw: unknown): raw is Record<string, unknown> => typeof raw === 'object' && raw !== null && !Array.isArray(raw)
 
-// A name from a file as it is shown: no C0 or C1 control characters, so no terminal escape or newline.
-const shown = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+// A name from a file as it is shown: no C0 or C1 control characters, so no terminal escape or newline,
+// and no bidi control or zero-width character, so a name can't reorder or hide the text around it.
+const shown = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/g, '')
+
+// A name as matching compares it: one space between words, lowercase.
+export const normalName = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase()
+
+// One exercise however it is spelled: `Dips`, `dips` and ` dips ` are the same exercise.
+export const sameExercise = (a: string, b: string) => normalName(a) === normalName(b)
 
 // A single day's plan reads as it always has: any named exercise with a numeric goal, 0
 // included (a frozen no-plan day is `reps`/0). Its other fields stay, so a rewrite keeps them.
@@ -39,7 +46,7 @@ const asPlan = (raw: unknown): Plan | undefined => {
   if (!isRecord(raw) || typeof raw.exercise !== 'string' || shown(raw.exercise).trim() === '') return undefined
   if (typeof raw.goal !== 'number' || !Number.isFinite(raw.goal)) return undefined
   const { unit, ...rest } = raw
-  return { ...rest, exercise: shown(raw.exercise), goal: raw.goal, ...(typeof unit === 'string' ? { unit: shown(unit) } : {}) }
+  return { ...rest, exercise: shown(raw.exercise).trim(), goal: raw.goal, ...(typeof unit === 'string' ? { unit: shown(unit) } : {}) }
 }
 
 // One routine day from its file form. `dropped` names each entry left out, for
@@ -57,14 +64,14 @@ export const parseRoutineDay = (raw: unknown, where = ''): { day?: RoutineDay; d
       const why =
         name === '' ? 'no name'
         : plan === undefined || plan.goal <= 0 ? 'goal must be above 0'
-        : seen.has(name.toLowerCase()) ? 'listed twice'
+        : seen.has(normalName(name)) ? 'listed twice'
         : plans.length >= MAX_EXERCISES ? `over ${MAX_EXERCISES} exercises`
         : undefined
       if (why !== undefined || plan === undefined) {
         dropped.push(`${at}${name === '' ? `#${i + 1}` : name} (${why})`)
         continue
       }
-      seen.add(name.toLowerCase())
+      seen.add(normalName(name))
       plans.push({ ...plan, exercise: name })
     }
     const named = typeof raw.name === 'string' ? shown(raw.name).trim() : ''
@@ -116,8 +123,8 @@ export const parseDayLog = (text: string | undefined, exercises: readonly string
     const raw = countsObject(trimmed)
     if (raw === undefined) return zeros
     const counts = new Map(Object.entries(raw).flatMap(([key, value]) =>
-      typeof value === 'number' && Number.isFinite(value) ? [[key.toLowerCase(), Math.max(0, value)] as const] : []))
-    const read = exercises.map(exercise => counts.get(exercise.toLowerCase()))
+      typeof value === 'number' && Number.isFinite(value) ? [[normalName(key), Math.max(0, value)] as const] : []))
+    const read = exercises.map(exercise => counts.get(normalName(exercise)))
     if (exercises.length === 1 && read[0] === undefined) return [[...counts.values()][0] ?? 0]
     return read.map(count => count ?? 0)
   }
@@ -128,8 +135,8 @@ export const parseDayLog = (text: string | undefined, exercises: readonly string
 // A multi day's log keeps the counts `before` (the file's text) holds for exercises off its plan now.
 export const formatDayLog = (entries: readonly { exercise: string; count: number }[], isMulti: boolean, before?: string) => {
   if (!isMulti) return `${entries[0]?.count ?? 0}\n`
-  const planned = new Set(entries.map(({ exercise }) => exercise.toLowerCase()))
-  const kept = Object.entries(countsObject(before?.trim() ?? '') ?? {}).filter(([key]) => !planned.has(key.toLowerCase()))
+  const planned = new Set(entries.map(({ exercise }) => normalName(exercise)))
+  const kept = Object.entries(countsObject(before?.trim() ?? '') ?? {}).filter(([key]) => !planned.has(normalName(key)))
   return `${JSON.stringify(Object.fromEntries([...entries.map(({ exercise, count }) => [exercise, count] as const), ...kept]))}\n`
 }
 
@@ -142,7 +149,7 @@ const dayGoalsOverFile = (rawDay: unknown, day: RoutineDay) => {
   const left = [...day.plans]
   const exercises = rawDay.exercises.map((entry: unknown) => {
     const plan = asPlan(entry)
-    const at = plan === undefined || plan.goal <= 0 ? -1 : left.findIndex(kept => kept.exercise === plan.exercise.trim())
+    const at = plan === undefined || plan.goal <= 0 ? -1 : left.findIndex(kept => sameExercise(kept.exercise, plan.exercise))
     const [match] = at < 0 ? [] : left.splice(at, 1)
     return match === undefined || !isRecord(entry) ? entry : { ...entry, goal: match.goal }
   })
@@ -157,12 +164,9 @@ export const goalsOverFile = (raw: Record<string, unknown>, routine: Routine): R
 
 // Which exercise a bare `/fit 20` logs to: the one logged last today, or the first.
 export const logTarget = (exercises: readonly { exercise: string }[], last: string | undefined) =>
-  Math.max(0, exercises.findIndex(entry => entry.exercise === last))
+  Math.max(0, exercises.findIndex(entry => last !== undefined && sameExercise(entry.exercise, last)))
 
 export type ExerciseMatch = { kind: 'one'; index: number } | { kind: 'many'; names: string[] } | { kind: 'none' }
-
-// A name as matching compares it: one space between words, lowercase.
-const normalName = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase()
 
 // Which of `names` a typed name means: a whole name in any case, else the only one it starts.
 export const matchExercise = (typed: string, names: readonly string[]): ExerciseMatch => {
@@ -435,11 +439,11 @@ export const SIZES = { Light: 0.5, Standard: 1, Heavy: 2 } as const satisfies Re
 export const scale = (routine: Routine, factor: number): Routine =>
   mapPlans(routine, plan => ({ ...plan, goal: Math.max(5, Math.round((plan.goal * factor) / 5) * 5) }))
 
-// Each exercise in a routine once, with its first day's goal.
+// Each exercise in a routine once, in its first spelling, with its first day's goal.
 export const exerciseGoals = (routine: Routine): Record<string, number> => {
-  const goals = new Map<string, number>()
-  for (const plan of allPlans(routine)) if (!goals.has(plan.exercise)) goals.set(plan.exercise, plan.goal)
-  return Object.fromEntries(goals)
+  const goals = new Map<string, [string, number]>()
+  for (const plan of allPlans(routine)) if (!goals.has(normalName(plan.exercise))) goals.set(normalName(plan.exercise), [plan.exercise, plan.goal])
+  return Object.fromEntries(goals.values())
 }
 
 // The goal typed for an exercise: an own field only, so `constructor` is never Object's.
@@ -454,9 +458,9 @@ export const customRoutine = (base: Routine, goals: Record<string, string>): Rou
   for (const [exercise, prefill] of Object.entries(exerciseGoals(base))) {
     const text = typedGoal(goals, exercise).trim()
     if (!/^\d+$/.test(text) || Number(text) <= 0) return undefined
-    if (Number(text) !== prefill) parsed.set(exercise, Number(text))
+    if (Number(text) !== prefill) parsed.set(normalName(exercise), Number(text))
   }
-  return mapPlans(base, plan => ({ ...plan, goal: parsed.get(plan.exercise) ?? plan.goal }))
+  return mapPlans(base, plan => ({ ...plan, goal: parsed.get(normalName(plan.exercise)) ?? plan.goal }))
 }
 
 // "30 burpees" typed under Other: one exercise every day.
@@ -514,6 +518,11 @@ export const customDays = (base: Routine, lines: Record<string, string>): { rout
   const errors: string[] = []
   // A unit routine.json already uses reads too, so its days' lines read back.
   const units = [...new Set(['s', ...allPlans(base).flatMap(plan => (plan.unit === undefined ? [] : [plan.unit]))])]
+  // An exercise the routine already has keeps its spelling, so `Dips` typed as `dips` stays one exercise.
+  const spelling = new Map<string, string>()
+  for (const plan of allPlans(base)) if (!spelling.has(normalName(plan.exercise))) spelling.set(normalName(plan.exercise), plan.exercise)
+  const respelled = (day: RoutineDay): RoutineDay =>
+    ({ ...day, plans: day.plans.map(plan => ({ ...plan, exercise: spelling.get(normalName(plan.exercise)) ?? plan.exercise })) })
   for (const [weekday, label] of WEEK_LINES) {
     const line = (Object.hasOwn(lines, weekday) ? (lines[weekday] ?? '') : '').trim()
     if (line === dayLine(base[weekday]).trim()) continue
@@ -523,7 +532,7 @@ export const customDays = (base: Routine, lines: Record<string, string>): { rout
     }
     const read = parseDayLine(line, units)
     if ('error' in read) errors.push(`${label}: ${read.error}`)
-    else routine[weekday] = read.day
+    else routine[weekday] = respelled(read.day)
   }
   return errors.length > 0 ? { errors } : { routine }
 }
@@ -552,9 +561,9 @@ const dayOverFile = (rawDay: unknown, day: RoutineDay) => {
   const { kept, left } = keptAndLeft(rawDay)
   const byName = new Map(kept.flatMap(entry => {
     const plan = asPlan(entry)
-    return plan === undefined ? [] : [[plan.exercise.trim().toLowerCase(), entry] as const]
+    return plan === undefined ? [] : [[normalName(plan.exercise), entry] as const]
   }))
-  const plans = day.plans.map(plan => ({ ...plan, ...otherFields(byName.get(plan.exercise.toLowerCase()), PLAN_FIELDS) }))
+  const plans = day.plans.map(plan => ({ ...plan, ...otherFields(byName.get(normalName(plan.exercise)), PLAN_FIELDS) }))
   if (!isMultiDay(day)) return plans[0] ?? NO_PLAN
   const exercises: unknown[] = [...plans]
   for (const entry of left) {
@@ -595,16 +604,16 @@ export const nextGoal = (goal: number, past: readonly Day[]) => {
 // routine that sets two goals for one exercise trades sessions between them,
 // so neither is the last session of the other.
 export const canProgress = (routine: Routine, exercise: string) =>
-  new Set(allPlans(routine).filter(plan => plan.exercise === exercise).map(plan => plan.goal)).size === 1
+  new Set(allPlans(routine).filter(plan => sameExercise(plan.exercise, exercise)).map(plan => plan.goal)).size === 1
 
 // Whether a session at `goal` moves the exercise on: the routine's one goal for it, not a goal of its own.
 export const progressesAt = (routine: Routine, exercise: string, goal: number) =>
-  canProgress(routine, exercise) && allPlans(routine).some(plan => plan.exercise === exercise && plan.goal === goal)
+  canProgress(routine, exercise) && allPlans(routine).some(plan => sameExercise(plan.exercise, exercise) && plan.goal === goal)
 
 // The routine with an exercise's goal moved: only the days at the old goal, so
 // days a custom program set apart keep theirs.
 export const moveGoal = (routine: Routine, exercise: string, from: number, to: number): Routine =>
-  mapPlans(routine, plan => (plan.exercise === exercise && plan.goal === from ? { ...plan, goal: to } : plan))
+  mapPlans(routine, plan => (sameExercise(plan.exercise, exercise) && plan.goal === from ? { ...plan, goal: to } : plan))
 
 // One exercise put in place of another by `/fit swap <out> <in>`.
 type SwapMove = { from: string; to: string }
@@ -650,7 +659,7 @@ const swapIndex = (days: readonly RoutineDay[], current: RoutineDay) => {
 
 // The swap a bare `/fit swap`, a day's name, one exercise or two names asks for; a day's name beats an exercise's.
 export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): SwapPick => {
-  const plans = [...new Map(allPlans(routine).map(plan => [plan.exercise, plan])).values()]
+  const plans = [...new Map(allPlans(routine).map(plan => [normalName(plan.exercise), plan])).values()]
   const names = plans.map(plan => plan.exercise)
   if (plans.length === 0) return { kind: 'refuse', text: 'Your program has no exercises. /fit program to pick one.' }
   const same = (day: RoutineDay): SwapPick => ({ kind: 'same', name: swapName(day) })
@@ -675,10 +684,10 @@ export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): Swa
   if (byExercise.kind === 'one') {
     const plan = plans[byExercise.index] ?? NO_PLAN
     if (isMultiDay(current)) {
-      const example = today.includes(plan.exercise) ? `${plan.exercise} <in>` : `<out> ${plan.exercise}`
+      const example = today.some(name => sameExercise(name, plan.exercise)) ? `${plan.exercise} <in>` : `<out> ${plan.exercise}`
       return { kind: 'refuse', text: `Today has ${today.length} exercises, so name the one to swap out and the one to put in: /fit swap ${example}. Today: ${today.join(', ')}.` }
     }
-    return plan.exercise === today[0] ? same(current) : { kind: 'day', day: single(plan) }
+    return sameExercise(plan.exercise, today[0] ?? '') ? same(current) : { kind: 'day', day: single(plan) }
   }
   if (byDay.kind === 'many' || byExercise.kind === 'many') {
     return { kind: 'refuse', text: couldBeText(typed, [...(byDay.kind === 'many' ? byDay.names : []), ...(byExercise.kind === 'many' ? byExercise.names : [])], 'nothing swapped') }
@@ -694,8 +703,8 @@ export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): Swa
     if (out.kind !== 'one' || into.kind !== 'one') continue
     const old = current.plans[out.index] ?? NO_PLAN
     const plan = plans[into.index] ?? NO_PLAN
-    if (normalName(plan.exercise) === normalName(old.exercise)) return { kind: 'same', name: old.exercise }
-    if (today.some(name => normalName(name) === normalName(plan.exercise))) return { kind: 'refuse', text: `${plan.exercise} is already on today's plan. Today: ${today.join(', ')}.` }
+    if (sameExercise(plan.exercise, old.exercise)) return { kind: 'same', name: old.exercise }
+    if (today.some(name => sameExercise(name, plan.exercise))) return { kind: 'refuse', text: `${plan.exercise} is already on today's plan. Today: ${today.join(', ')}.` }
     return { kind: 'moved', day: withPlan(current, out.index, plan), moved: { from: old.exercise, to: plan.exercise } }
   }
   if (unclear !== undefined) return { kind: 'refuse', text: unclear }
@@ -869,7 +878,7 @@ export const paceScale = (day: { isMulti: boolean; exercises: readonly Tally[] }
 // logged last first: each the share a set is of the day, of that exercise's goal, never past it.
 export const setIdeas = <E extends Tally & { exercise: string }>(exercises: readonly E[], last: string | undefined) => {
   const open = exercises.filter(e => e.goal > 0 && e.count < e.goal)
-  const lead = open.find(e => e.exercise === last) ?? open[0]
+  const lead = open.find(e => last !== undefined && sameExercise(e.exercise, last)) ?? open[0]
   const ordered = lead === undefined ? [] : [lead, ...open.filter(e => e !== lead)]
   return ordered.map(e => ({ ...e, amount: Math.min(Math.ceil((e.goal * MULTI_PACE.setSize) / MULTI_PACE.goal), e.goal - e.count) }))
 }

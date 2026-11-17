@@ -59,6 +59,7 @@ import {
   progressesAt,
   repSteps,
   routineToFile,
+  sameExercise,
   scale,
   single,
   streak,
@@ -214,7 +215,7 @@ const progress = async ($: Engine, date: string) => {
   // Every exercise's sessions, single days and multi alike; an exercise with no reps that day had none.
   const days = (await Promise.all(before.map(ms => readDay($, routine, logDir, ms)))).flat()
   const moves = plans.flatMap(plan => {
-    const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
+    const to = nextGoal(plan.goal, days.filter(day => sameExercise(day.exercise, plan.exercise)))
     return to === undefined ? [] : [{ plan, to }]
   })
   if (moves.length === 0) return
@@ -602,7 +603,7 @@ const setSizeOf = (t: Today, e: TodayExercise) => setSizeFor(e.goal, t.isMulti ?
 const logReps = async ($: Engine, change: (count: number) => number, exercise?: string) => {
   const owed = await refreshPace($)
   const before = await refreshToday($)
-  const at = exercise === undefined ? logTarget(before.exercises, before.last) : before.exercises.findIndex(e => e.exercise === exercise)
+  const at = exercise === undefined ? logTarget(before.exercises, before.last) : before.exercises.findIndex(e => sameExercise(e.exercise, exercise))
   const was = before.exercises[at]
   // A press from a band drawn before the plan changed: log nothing rather than the wrong exercise.
   if (was === undefined) {
@@ -961,7 +962,7 @@ export const register: Register = (on, options) => {
         }
         const n = cmd.n
         const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
-        const logged = exercise === undefined ? focusOf(t) : t.exercises.find(e => e.exercise === exercise)
+        const logged = exercise === undefined ? focusOf(t) : t.exercises.find(e => sameExercise(e.exercise, exercise))
         // The plan changed under the command: logReps logged nothing and toasted why.
         if (logged === undefined) return { text: `${exercise} isn't on today's plan any more, so nothing logged.` }
         return { text: `${line(logged)}${t.isMulti ? leftText(logged) : ''}${paceText(await read($, pace), isStrict, await $.clock.now())}` }

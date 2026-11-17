@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, exerciseGoals, formatDayLog, heatCells, HELP, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customDays, customRoutine, dayLine, dayShare, daysOverFile, describeRoutine, exerciseGoals, formatDayLog, heatCells, HELP, logTarget, matchExercise, moveGoal, nextGoal, paceAt, paceScale, parseCustom, parseDayLine, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, progressesAt, repSteps, routineToFile, scale, setIdeas, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
 
 // A routine as routine.json would hold it, read into the shape the helpers take.
 const asRoutine = (raw: object) => parseRoutine(raw).routine
@@ -2017,6 +2017,38 @@ describe('multi days', () => {
     ])
   })
 
+  test('names lose bidi controls and zero-width characters too', () => {
+    const { routine, dropped } = parseRoutine({
+      mon: { name: '⁦Arms⁩ day﻿', exercises: [{ exercise: 'di‮ps​', goal: 100 }, { exercise: 'x‏', goal: 0 }] },
+      tue: { exercise: '⁠squats‍', goal: 300 },
+    })
+    expect(routine.mon).toEqual({ isMulti: true, name: 'Arms day', plans: [{ exercise: 'dips', goal: 100 }] })
+    expect(routine.tue?.plans[0]?.exercise).toBe('squats')
+    expect(dropped).toEqual(['mon x (goal must be above 0)'])
+  })
+
+  test('an exercise is one exercise in any case or spacing: its plans, the last log, progress and the scoreboard', () => {
+    const routine = asRoutine({ mon: { exercise: ' Dips ', goal: 100 }, tue: { name: 'Arms', exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'plank', goal: 60, unit: 's' }] } })
+    expect(routine.mon?.plans[0]?.exercise).toBe('Dips')
+    expect(exerciseGoals(routine)).toEqual({ Dips: 100, plank: 60 })
+    expect(customRoutine(routine, { Dips: '120', plank: '60' })?.tue?.plans[0]?.goal).toBe(120)
+    expect(canProgress(asRoutine({ mon: { exercise: 'Dips', goal: 100 }, tue: { exercise: 'dips', goal: 80 } }), 'dips')).toBe(false)
+    expect(progressesAt(routine, 'DIPS', 100)).toBe(true)
+    const moved = moveGoal(routine, 'dips', 100, 105)
+    expect([moved.mon?.plans[0]?.goal, moved.tue?.plans[0]?.goal]).toEqual([105, 105])
+    expect(logTarget([{ exercise: 'dips' }, { exercise: 'plank' }], 'Plank')).toBe(1)
+    const ledger = [logged('2026-10-03', 100, 'Dips'), logged('2026-10-04', 50, 'dips')]
+    expect(exerciseTotals(ledger).map(row => [row.exercise, row.total, row.days])).toEqual([['Dips', 150, 2]])
+    const colors = exerciseColors(ledger)
+    expect([...colors.keys()]).toEqual(['Dips'])
+    expect(rangeSummary(ledger, 'dips', MONDAY_9AM, 7).total).toBe(150)
+    expect(chartBars(ledger, colors, MONDAY_9AM, 3, 40)).toEqual([
+      { segments: [{ reps: 100, color: GOLD }] },
+      { segments: [{ reps: 50, color: faded(GOLD) }] },
+      { segments: [] },
+    ])
+  })
+
   test('one toast a conversation names what the routine left out, and the mod carries on', async ($, on) => {
     const { toasts, session } = multiWorld(on, new Map([[ROUTINE, JSON.stringify({ mon: { name: 'Arms day', exercises: [{ exercise: 'dips', goal: 100 }, { exercise: 'Dips', goal: 5 }, { exercise: 'plank' }] } })]]))
     // Its own conversation: the toast's once-per-conversation mark starts clear whatever ran before.
@@ -2444,6 +2476,16 @@ describe('multi days', () => {
     await fit($, 'set 180')
     // The day's last exercise finishes the day: its toast lists every count, then the promise.
     expect(toasts).toContain("✅ Arms day done: 100/100 dips, 50/50 pushups, 180/180s plank. That's the work. Next plank day: 190s.")
+  })
+
+  test('progressive goals count a session of an exercise spelled in another case', { options: { progress: true } }, async ($, on) => {
+    const { files } = multiWorld(on, new Map([
+      [ROUTINE, JSON.stringify({ mon: { exercise: 'Pushups', goal: 100 }, sun: { exercise: 'pushups', goal: 100 } })],
+      [`${LOG}/2026-10-04`, '100\n'],
+    ]))
+    await start($)
+    const routine = routineFile(files)
+    expect([...goalsOf(routine, 'mon'), ...goalsOf(routine, 'sun')]).toEqual([105, 105])
   })
 
   test('a swap file holds a multi day too', async ($, on) => {
@@ -3150,6 +3192,13 @@ describe('custom days', () => {
     expect(files.get(ROUTINE)).toBe('[]')
     expect(toasts).toContain('routine.json holds no JSON object, so the program was not written. Fix the file, or pick a preset.')
     expect(toasts.some(t => t.startsWith('Program set'))).toBe(false)
+  })
+
+  test('a typed exercise the routine already has keeps its spelling', () => {
+    const base = asRoutine({ mon: { exercise: 'Dips', goal: 100 } })
+    expect(customDays(base, { mon: '100 Dips', tue: 'arms: 50 dips, 30s plank' })).toEqual({
+      routine: { mon: base.mon, tue: { isMulti: true, name: 'arms', plans: [{ exercise: 'Dips', goal: 50 }, { exercise: 'plank', goal: 30, unit: 's' }] } },
+    })
   })
 
   test('/fit help describes custom days', async ($, on) => {

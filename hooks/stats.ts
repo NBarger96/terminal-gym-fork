@@ -1,8 +1,9 @@
 import type { Day } from '../types'
-import { DEFAULT, EMPTY, GRID_COLORS, byDate, dayKey, encodeCells, entriesByDate, isDateDone, isDone, keepsDateStreak, lastDays, noonOf } from './lib'
+import { DEFAULT, EMPTY, GRID_COLORS, byDate, dayKey, encodeCells, entriesByDate, isDateDone, isDone, keepsDateStreak, lastDays, noonOf, normalName, sameExercise } from './lib'
 
 // The scoreboard's numbers and charts from the ledger: every day with reps, oldest first, one entry
 // per exercise (a multi day's share a date, and one may have none). Pure, so a drawing only reads them.
+// An exercise is one however it is spelled (`Dips`, `dips`), and is named by its first spelling.
 
 const DAY_MS = 86_400_000
 // Today on the year grid: the band's green, which no exercise wears.
@@ -31,13 +32,17 @@ export type ExerciseColors = ReadonlyMap<string, number>
 // By first day logged, which never changes, so an exercise keeps its colour.
 export const exerciseColors = (ledger: readonly Day[]): ExerciseColors => {
   const colors = new Map<string, number>()
+  const seen = new Set<string>()
   for (const day of ledger) {
-    if (day.count > 0 && !colors.has(day.exercise)) colors.set(day.exercise, EXERCISE_HUES[colors.size] ?? OTHER_HUE)
+    if (day.count <= 0 || seen.has(normalName(day.exercise))) continue
+    seen.add(normalName(day.exercise))
+    colors.set(day.exercise, EXERCISE_HUES[colors.size] ?? OTHER_HUE)
   }
   return colors
 }
 
-const colorOf = (colors: ExerciseColors, exercise: string) => colors.get(exercise) ?? OTHER_HUE
+const colorOf = (colors: ExerciseColors, exercise: string) =>
+  colors.get(exercise) ?? [...colors].find(([name]) => sameExercise(name, exercise))?.[1] ?? OTHER_HUE
 
 export const RANGES = [
   { days: 7, label: '7d' },
@@ -73,7 +78,8 @@ export const exerciseTotals = (ledger: readonly Day[]): ExerciseTotal[] => {
   const totals = new Map<string, ExerciseTotal>()
   for (const day of ledger) {
     if (day.count <= 0) continue
-    const row = totals.get(day.exercise) ?? { exercise: day.exercise, unit: day.unit ?? '', total: 0, days: 0, goalsHit: 0, best: 0, bestDate: '' }
+    const key = normalName(day.exercise)
+    const row = totals.get(key) ?? { exercise: day.exercise, unit: day.unit ?? '', total: 0, days: 0, goalsHit: 0, best: 0, bestDate: '' }
     row.total += day.count
     row.days += 1
     if (isDone(day)) row.goalsHit += 1
@@ -82,7 +88,7 @@ export const exerciseTotals = (ledger: readonly Day[]): ExerciseTotal[] => {
       row.best = day.count
       row.bestDate = day.date
     }
-    totals.set(day.exercise, row)
+    totals.set(key, row)
   }
   return [...totals.values()].sort((a, b) => b.total - a.total)
 }
@@ -113,7 +119,7 @@ export const bestStreak = (ledger: readonly Day[]) => {
 export const rangeSummary = (ledger: readonly Day[], exercise: string, now: number, days: number) => {
   const span = lastDays(now, days * 2)
   const [priorFrom, priorTo, from, to] = [span[0], span[days - 1], span[days], span[days * 2 - 1]].map(ms => dayKey(ms ?? now)) as [string, string, string, string]
-  const own = ledger.filter(day => day.exercise === exercise && day.count > 0)
+  const own = ledger.filter(day => sameExercise(day.exercise, exercise) && day.count > 0)
   const inRange = within(own, from, to)
   const total = sum(inRange)
   const prior = sum(within(own, priorFrom, priorTo))
@@ -151,7 +157,7 @@ export const chartBars = (ledger: readonly Day[], colors: ExerciseColors, now: n
     const sessions = span.slice(Math.max(0, end - bucket), end).flatMap(date => dated.get(date) ?? [])
     // Stacked in colour order, so a hue sits low or high the same way in every bar.
     const segments = [...colors].flatMap(([exercise, hue]) => {
-      const own = sessions.filter(day => day.exercise === exercise)
+      const own = sessions.filter(day => sameExercise(day.exercise, exercise))
       return [
         { reps: sum(own.filter(isDone)), color: hue },
         { reps: sum(own.filter(day => !isDone(day))), color: faded(hue) },
