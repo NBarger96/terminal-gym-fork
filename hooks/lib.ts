@@ -1,4 +1,4 @@
-import type { Day, Pace, Plan, RoutineDay } from '../types'
+import type { Day, Pace, Plan, RoutineDay, Today } from '../types'
 
 // Weekday key to its day, every day in the one internal shape.
 export type Routine = Record<string, RoutineDay>
@@ -228,13 +228,14 @@ export type FitCommand =
   | { kind: 'reset' }
   | { kind: 'intro' }
   | { kind: 'program' }
-  | { kind: 'swap'; exercise?: string }
+  // `typedName`: a day's name, an exercise, or two exercises (out, in); pickSwap tells them apart.
+  | { kind: 'swap'; typedName?: string }
   | { kind: 'strict'; isOn: boolean }
   | { kind: 'progress'; isOn: boolean }
   // `typedName`: what was typed after the number, all or the start of a name; absent, a bare /fit's target.
   | { kind: 'add'; n: number; typedName?: string }
   | { kind: 'set'; n: number; typedName?: string }
-  | { kind: 'goal'; n: number }
+  | { kind: 'goal'; n: number; typedName?: string }
   // null: back to the configured window from the first prompt.
   | { kind: 'window'; hours: number | null }
   | { kind: 'window-until'; hour: number; minute: number }
@@ -244,7 +245,7 @@ export type FitCommand =
 // How long a set can be put off, and how often.
 export const SNOOZE = { defaultMinutes: 30, maxMinutes: 60, perDay: 2 } as const
 
-const USAGE = 'usage: /fit [<n> [exercise] | set <n> [exercise] | reset | goal <n> | window <hours>|<hhmm>|off | snooze [minutes] | swap [exercise] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]'
+const USAGE = 'usage: /fit [<n> [exercise] | set <n> [exercise] | reset | goal <n> [exercise] | window <hours>|<hhmm>|off | snooze [minutes] | swap [day | exercise | out in] | rest [off] | streak [days] | program | progress [off] | help | strict | easy | reload | start | hide]'
 
 // The name typed after `/fit 20` or `/fit set 80`: names may be several words ("jumping jacks").
 const namedAfter = (args: string, words: number) => {
@@ -264,11 +265,7 @@ export const parseFit = (args: string): FitCommand => {
   }
   if (head === 'rest') return value === 'off' ? { kind: 'unskip' } : { kind: 'skip' }
   if (head === 'program') return { kind: 'program' }
-  if (head === 'swap') {
-    // Names may be several words ("jumping jacks"): keep everything after "swap".
-    const name = args.trim().replace(/^swap\s*/, '').replace(/\s+/g, ' ').toLowerCase()
-    return name === '' ? { kind: 'swap' } : { kind: 'swap', exercise: name }
-  }
+  if (head === 'swap') return { kind: 'swap', ...namedAfter(args, 1) }
   if (head === 'help' || head === 'rules') return { kind: 'help' }
   if (head === 'hide') return { kind: 'hide' }
   if (head === 'reload' || head === 'sync') return { kind: 'reload' }
@@ -284,7 +281,7 @@ export const parseFit = (args: string): FitCommand => {
   }
   if (head === 'goal') {
     return value !== undefined && /^\d+$/.test(value) && Number(value) > 0
-      ? { kind: 'goal', n: Number(value) }
+      ? { kind: 'goal', n: Number(value), ...namedAfter(args, 2) }
       : { kind: 'error', text: 'fit: goal needs a number of reps, like /fit goal 60' }
   }
   if (head === 'window') {
@@ -609,13 +606,158 @@ export const progressesAt = (routine: Routine, exercise: string, goal: number) =
 export const moveGoal = (routine: Routine, exercise: string, from: number, to: number): Routine =>
   mapPlans(routine, plan => (plan.exercise === exercise && plan.goal === from ? { ...plan, goal: to } : plan))
 
-// Today's exercise, swapped: the next one in the routine, or the one named.
-export const pickSwap = (routine: Routine, current: string, wanted?: string) => {
+// One exercise put in place of another by `/fit swap <out> <in>`.
+type SwapMove = { from: string; to: string }
+
+// One exercise's count in today's log.
+type Count = { exercise: string; count: number }
+
+// What `/fit swap` makes today: a whole day, one exercise moved, or why today stays as it is.
+export type SwapPick =
+  | { kind: 'day'; day: RoutineDay; alsoExercises?: string[] }
+  | { kind: 'moved'; day: RoutineDay; moved: SwapMove }
+  | { kind: 'same'; name: string }
+  | { kind: 'refuse'; text: string }
+
+// The reply to a name that fits several: nothing happens until more of it is typed.
+export const couldBeText = (typed: string, names: readonly string[], outcome: string) =>
+  `"${typed}" could be ${names.join(' or ')}, so ${outcome}. Type more of the name.`
+
+// `day` with its plan at `at` replaced; a single day becomes that plan alone.
+const withPlan = (day: RoutineDay, at: number, plan: Plan): RoutineDay =>
+  isMultiDay(day) ? { ...day, plans: day.plans.map((kept, i) => (i === at ? plan : kept)) } : single(plan)
+
+// A day as a swap tells days apart: a single day by its exercise, a multi day by its name and exercises.
+const swapKey = (day: RoutineDay) =>
+  isMultiDay(day) ? JSON.stringify([day.name ?? '', ...day.plans.map(plan => normalName(plan.exercise))]) : normalName(day.plans[0]?.exercise ?? '')
+
+export const swapName = (day: RoutineDay) =>
+  isMultiDay(day) ? day.name ?? day.plans.map(plan => plan.exercise).join(' · ') : day.plans[0]?.exercise ?? NO_PLAN.exercise
+
+// Each different day of the routine once, in its first place; a single day takes its exercise's last plan.
+const swapDays = (routine: Routine) => {
+  const days = new Map<string, RoutineDay>()
+  for (const day of Object.values(routine)) if (day.plans.length > 0) days.set(swapKey(day), day)
+  return [...days.values()]
+}
+
+// Where a bare swap starts: today's day, else a multi day of today's name (one exercise swapped since).
+const swapIndex = (days: readonly RoutineDay[], current: RoutineDay) => {
+  const at = days.findIndex(day => swapKey(day) === swapKey(current))
+  if (at >= 0 || !isMultiDay(current) || current.name === undefined) return at
+  return days.findIndex(day => isMultiDay(day) && normalName(day.name ?? '') === normalName(current.name ?? ''))
+}
+
+// The swap a bare `/fit swap`, a day's name, one exercise or two names asks for; a day's name beats an exercise's.
+export const pickSwap = (routine: Routine, current: RoutineDay, typed = ''): SwapPick => {
   const plans = [...new Map(allPlans(routine).map(plan => [plan.exercise, plan])).values()]
-  if (wanted !== undefined) return plans.find(plan => plan.exercise.toLowerCase() === wanted)
-  if (plans.length === 0) return undefined
-  const at = plans.findIndex(plan => plan.exercise === current)
-  return plans[(at + 1) % plans.length]
+  const names = plans.map(plan => plan.exercise)
+  if (plans.length === 0) return { kind: 'refuse', text: 'Your program has no exercises. /fit program to pick one.' }
+  const same = (day: RoutineDay): SwapPick => ({ kind: 'same', name: swapName(day) })
+  if (normalName(typed) === '') {
+    const days = swapDays(routine)
+    const next = days[(swapIndex(days, current) + 1) % days.length]
+    return next === undefined || swapKey(next) === swapKey(current) ? same(current) : { kind: 'day', day: next }
+  }
+  const named = new Map<string, RoutineDay>()
+  for (const day of Object.values(routine)) if (isMultiDay(day) && day.name !== undefined && !named.has(normalName(day.name))) named.set(normalName(day.name), day)
+  const dayNames = [...named.values()].map(day => day.name ?? '')
+  const byDay = matchExercise(typed, dayNames)
+  const byExercise = matchExercise(typed, names)
+  const today = current.plans.map(plan => plan.exercise)
+  const twoNames = `/fit swap <out> <in> puts one exercise in place of another. Today: ${today.join(', ')}.`
+  if (byDay.kind === 'one') {
+    const day = [...named.values()][byDay.index] ?? current
+    if (swapKey(day) === swapKey(current)) return same(current)
+    const also = byExercise.kind === 'one' ? [names[byExercise.index] ?? typed] : byExercise.kind === 'many' ? byExercise.names : []
+    return { kind: 'day', day, ...(also.length === 0 ? {} : { alsoExercises: also }) }
+  }
+  if (byExercise.kind === 'one') {
+    const plan = plans[byExercise.index] ?? NO_PLAN
+    if (isMultiDay(current)) {
+      const example = today.includes(plan.exercise) ? `${plan.exercise} <in>` : `<out> ${plan.exercise}`
+      return { kind: 'refuse', text: `Today has ${today.length} exercises, so name the one to swap out and the one to put in: /fit swap ${example}. Today: ${today.join(', ')}.` }
+    }
+    return plan.exercise === today[0] ? same(current) : { kind: 'day', day: single(plan) }
+  }
+  if (byDay.kind === 'many' || byExercise.kind === 'many') {
+    return { kind: 'refuse', text: couldBeText(typed, [...(byDay.kind === 'many' ? byDay.names : []), ...(byExercise.kind === 'many' ? byExercise.names : [])], 'nothing swapped') }
+  }
+  // Two names: each split of the words, the first part one of today's exercises and the rest one of the routine's.
+  const words = normalName(typed).split(' ')
+  let unclear: string | undefined
+  for (let i = 1; i < words.length; i++) {
+    const outName = words.slice(0, i).join(' ')
+    const out = matchExercise(outName, today)
+    const into = matchExercise(words.slice(i).join(' '), names)
+    if (out.kind === 'many' && into.kind === 'one') unclear ??= couldBeText(outName, out.names, 'nothing swapped')
+    if (out.kind !== 'one' || into.kind !== 'one') continue
+    const old = current.plans[out.index] ?? NO_PLAN
+    const plan = plans[into.index] ?? NO_PLAN
+    if (normalName(plan.exercise) === normalName(old.exercise)) return { kind: 'same', name: old.exercise }
+    if (today.some(name => normalName(name) === normalName(plan.exercise))) return { kind: 'refuse', text: `${plan.exercise} is already on today's plan. Today: ${today.join(', ')}.` }
+    return { kind: 'moved', day: withPlan(current, out.index, plan), moved: { from: old.exercise, to: plan.exercise } }
+  }
+  if (unclear !== undefined) return { kind: 'refuse', text: unclear }
+  const orDay = dayNames.length === 0 ? '' : ` Or a day: ${dayNames.join(', ')}.`
+  return { kind: 'refuse', text: `No ${typed} in your program. Pick one of: ${names.join(', ')}.${orDay}${isMultiDay(current) ? ` ${twoNames}` : ''}` }
+}
+
+// A log's counts by key: numbers only, never below 0, so a hand-edited log reads as parseDayLog reads it.
+const logCounts = (raw: Record<string, unknown>) =>
+  Object.entries(raw).flatMap(([key, value]) => (typeof value === 'number' && Number.isFinite(value) ? [[key, Math.max(0, value)] as const] : []))
+
+// Today's log after a swap: counts follow their exercise, a moved one's goes to its replacement, and none is dropped.
+export const swappedLog = (from: readonly Count[], to: RoutineDay, before?: string, moved?: SwapMove) => {
+  // Keyed by name as matching compares it, each with the key the log writes for it.
+  const counts = new Map<string, Count>()
+  const keep = (exercise: string, count: number) => counts.set(normalName(exercise), { exercise, count })
+  if (before !== undefined && before.trim().startsWith('{')) for (const [key, count] of logCounts(countsObject(before.trim()) ?? {})) keep(key, count)
+  for (const { exercise, count } of from) keep(exercise, count)
+  if (moved !== undefined) {
+    keep(moved.to, counts.get(normalName(moved.from))?.count ?? 0)
+    counts.delete(normalName(moved.from))
+  }
+  const countOf = (exercise: string) => counts.get(normalName(exercise))?.count ?? 0
+  const plans = to.plans.length === 0 ? [NO_PLAN] : to.plans
+  const [first = NO_PLAN] = plans
+  // A single day's one count carries to another single day, as it always has.
+  if (!isMultiDay(to) && from.length === 1) return formatDayLog([{ exercise: first.exercise, count: from[0]?.count ?? 0 }], false)
+  const offPlan = Object.fromEntries([...counts.values()].map(({ exercise, count }) => [exercise, count]))
+  return formatDayLog(plans.map(plan => ({ exercise: plan.exercise, count: countOf(plan.exercise) })), true, JSON.stringify(offPlan))
+}
+
+// The reply's opening for a swap made: what changed, the count carried or kept, and a day name that beat an exercise.
+export const swapText = (pick: Extract<SwapPick, { kind: 'day' | 'moved' }>, before: Today, after: Today) => {
+  const moved = pick.kind === 'moved' ? pick.moved : undefined
+  const carriedFrom = moved !== undefined ? before.exercises.find(e => e.exercise === moved.from) : !before.isMulti && !isMultiDay(pick.day) ? before.exercises[0] : undefined
+  const keptCounts = after.exercises.filter(e => e.count > 0).map(e => `${e.count}${e.unit} ${e.exercise}`)
+  const counts =
+    carriedFrom !== undefined
+      ? carriedFrom.count > 0 ? ` Your ${carriedFrom.unit === '' ? `${carriedFrom.count} reps` : `${carriedFrom.count}${carriedFrom.unit}`} carry over.` : ''
+      : keptCounts.length > 0 ? ` Kept: ${keptCounts.join(', ')}.` : ''
+  const also = pick.kind === 'day' && pick.alsoExercises !== undefined
+    ? ` ${pick.alsoExercises.join(' and ')} ${pick.alsoExercises.length === 1 ? 'is an exercise' : 'are exercises'} too, and the day's name wins: /fit swap <out> <in> swaps one exercise.`
+    : ''
+  const head = moved !== undefined && before.isMulti ? `Swapped ${moved.from} for ${moved.to} today.` : `Swapped to ${swapName(pick.day)} today.`
+  return `${head}${counts}${also}`
+}
+
+// What `/fit goal <n> [exercise]` makes today; a multi day needs the exercise named.
+export const goalPick = (current: RoutineDay, n: number, typed?: string): { kind: 'goal'; day: RoutineDay; plan: Plan } | { kind: 'refuse'; text: string } => {
+  const plans = current.plans.length === 0 ? [NO_PLAN] : current.plans
+  const today = plans.map(plan => plan.exercise)
+  let at = 0
+  if (typed !== undefined) {
+    const match = matchExercise(typed, today)
+    if (match.kind === 'many') return { kind: 'refuse', text: couldBeText(typed, match.names, 'no goal changed') }
+    if (match.kind === 'none') return { kind: 'refuse', text: `No ${typed} today, so no goal changed. Today: ${today.join(', ')}.` }
+    at = match.index
+  } else if (isMultiDay(current)) {
+    return { kind: 'refuse', text: `Today has ${today.length} exercises: name the one to change, like /fit goal ${n} ${today[0]}. Nothing changed. Today: ${today.join(', ')}.` }
+  }
+  const plan = { ...(plans[at] ?? NO_PLAN), goal: n }
+  return { kind: 'goal', day: withPlan({ ...current, plans }, at, plan), plan }
 }
 
 // The scoreboard's barbell, the name across the bar. 34 columns wide.
@@ -775,10 +917,10 @@ or press a **+** button above the prompt (sized to your set)
 | \`/fit\` | today's progress |
 | \`/fit set 80 [exercise]\` | fix today's count (the exercise named, or the one logged last) |
 | \`/fit reset\` | today back to 0 |
-| \`/fit goal 60\` | change today's goal |
+| \`/fit goal 60 [exercise]\` | change today's goal |
 | \`/fit window 3\` | finish today in the next 3h |
 | \`/fit snooze 30\` | put the due set off 30 min (twice a day) |
-| \`/fit swap\` | switch today's exercise |
+| \`/fit swap [exercise or day]\` | switch today's exercise, or make today a day of your program |
 | \`/fit rest\` | rest day, before any reps (breaks streak) |
 | \`/fit rest off\` | undo today's rest day |
 | \`/fit streak\` | scoreboard: all-time totals, charts, the year |
@@ -817,10 +959,12 @@ A day in \`~/.claude/fitness/routine.json\` can hold up to 5 exercises, each wit
 - a toast lists what is left when an exercise finishes, and every count when the day does
 - a finished exercise shows ✅; the day counts once for the streak, and as hit when every exercise is
 - entries with no name, a goal of 0 or less, a repeated name or past the fifth are left out, and a toast names them
+- \`/fit swap dips situps\` puts situps in place of dips today, and dips' count carries over
+- \`/fit swap arms day\` makes today the day named Arms day, keeping counts for exercises on both; a day's name wins over an exercise's
+- \`/fit goal 60 dips\` changes dips' goal for today only; a bare \`/fit goal 60\` asks which exercise
 - in strict mode a multi day is paced as a whole: each exercise's share of its goal, capped at 100%, averaged, in 10 sets of 10%; extra dips never cover a skipped plank
 - a due set suggests a tenth of an exercise's goal, the one you logged last first: "10% of arms, e.g. 10 dips or 18s plank"; breathers, \`/fit snooze\` and \`/fit window\` work in those percent
 - with progressive goals on, each exercise's goal moves on its own sessions
-- not yet on a multi day: \`/fit swap\` and \`/fit goal\`
 
 ### Your data
 Stays on this machine, in \`~/.claude/fitness\`.`
