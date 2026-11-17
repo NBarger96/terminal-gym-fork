@@ -1,7 +1,7 @@
 import type { Elements } from 'claude-code'
 
 import type { Day } from '../types'
-import { BARBELL, GRID_COLORS, buttonsWidth, fullStreak, progressColor } from './lib'
+import { BARBELL, GRID_COLORS, buttonsWidth, byDate, fullStreak, progressColor } from './lib'
 import {
   RANGES,
   TODAY_COLOR,
@@ -85,7 +85,8 @@ export const drawScoreboard = (
   // Seconds and reps don't add up, so the headline counts reps alone.
   const lifetime = totals.filter(row => row.unit === '').reduce((all, row) => all + row.total, 0)
   const goalsHit = totals.reduce((all, row) => all + row.goalsHit, 0)
-  const trained = logged.length
+  // Days, not exercises: a multi day's date counts once.
+  const trained = byDate(logged).length
   const headline = (
     <Box flexDirection="column">
       <Text bold>🔥 {run}-day streak{best > run ? ` · best ${best}` : ''}</Text>
@@ -205,24 +206,28 @@ export const drawScoreboard = (
     </Box>
   )
 
-  // One row a day: date, its progress bar in the band's colors, then the count.
-  // Counts padded to one width so the exercise names line up.
-  const week = days.slice(-7)
+  // One row an exercise: date, its progress bar in the band's colors, then the
+  // count. A multi day's later rows leave the date blank. Counts padded to one
+  // width so the exercise names line up.
+  const dates = byDate(days).slice(-7)
+  const week = dates.flat()
   const counts = week.map(day => (day.isSkipped ? 'rest' : `${day.count}/${day.goal}`))
   const countWidth = Math.max(0, ...counts.map(count => count.length))
   const filled = (day: Day) => (day.goal > 0 ? Math.min(10, Math.floor((day.count / day.goal) * 10)) : 0)
+  const todayDate = dates[dates.length - 1]?.[0]?.date
   const summary = week.map((day, i) => {
     const mark = day.isSkipped ? '–' : day.goal > 0 && day.count >= day.goal ? '✓' : '·'
-    const isToday = i === week.length - 1
+    const isFirstOfDate = week[i - 1]?.date !== day.date
+    const isToday = day.date === todayDate
     const color = day.isSkipped ? undefined : progressColor(day.count, day.goal)
     return (
-      <Box key={`day-${day.date}`}>
-        <Text dimColor={!isToday} bold={isToday}>{`${mark} ${day.date.slice(5)}  `}</Text>
+      <Box key={`day-${day.date}-${day.exercise}`}>
+        <Text dimColor={!isToday} bold={isToday}>{`${mark} ${isFirstOfDate ? day.date.slice(5) : '     '}  `}</Text>
         {/* Thin lines, not shaded blocks: blocks on stacked rows merge into slabs. */}
         <Text color={color ?? GRID_COLORS.none}>{'━'.repeat(day.isSkipped ? 0 : filled(day))}</Text>
         <Text dimColor>{(day.isSkipped ? '╌' : '─').repeat(10 - (day.isSkipped ? 0 : filled(day)))}</Text>
         <Text dimColor={!isToday} bold={isToday}>
-          {`  ${(counts[i] ?? '').padEnd(countWidth)}  ${day.exercise}${isToday ? '  ◀ today' : ''}`}
+          {`  ${(counts[i] ?? '').padEnd(countWidth)}  ${day.exercise}${isToday && isFirstOfDate ? '  ◀ today' : ''}`}
         </Text>
       </Box>
     )

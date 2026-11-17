@@ -1,14 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Day, OnboardPick, Pace, Today } from '../types'
+import type { Day, OnboardPick, Pace, Plan, RoutineDay, Today, TodayExercise } from '../types'
 import {
   DEFAULT_ROUTINE,
   HELP,
+  NO_PLAN,
   SNOOZE,
   MINI_BARBELL,
   ROUTINES,
   SIZES,
+  allPlans,
   bar,
   earnedBreatherMs,
   clockTime,
@@ -22,20 +24,32 @@ import {
   cheer,
   customRoutine,
   dayKey,
+  dayToFile,
+  droppedText,
   exerciseGoals,
+  formatDayLog,
   fullStreak,
-  keepsStreak,
+  isDamagedLog,
+  isMultiDay,
+  keepsDateStreak,
   describeRoutine,
   heatCells,
   lastDays,
+  logTarget,
   moveGoal,
   nextGoal,
   noonOf,
+  parseDayLog,
   parseFit,
+  parseRoutine,
+  parseRoutineDay,
   pickSwap,
   progressColor,
   repSteps,
+  routineToFile,
   scale,
+  single,
+  singleDays,
   streak,
   weekdayKey,
 } from './lib'
@@ -72,6 +86,8 @@ const progressConfig = { isOn: false }
 let progressedOn = ''
 // The conversation the setup last ran for. /clear and /resume change it.
 let bootedFor = ''
+// The routine's left-out entries as last toasted: one toast per change, not per read.
+let warnedDropped = ''
 
 const today = atom({ plugin: 'terminal-gym', key: 'today' } as const, null)
 const olderStreak = atom({ plugin: 'terminal-gym', key: 'olderStreak' } as const, 0)
@@ -100,34 +116,46 @@ const files = async ($: Engine) => {
   return { routine: `${dir}/routine.json`, log: `${dir}/log` }
 }
 
+const writeRoutine = ($: Engine, routinePath: string, routine: Routine) =>
+  $.fs.write(routinePath, `${JSON.stringify(routineToFile(routine), null, 2)}\n`)
+
 const loadRoutine = async ($: Engine, routinePath: string): Promise<Routine> => {
   if (!(await $.fs.exists(routinePath))) {
-    await $.fs.write(routinePath, `${JSON.stringify(DEFAULT_ROUTINE, null, 2)}\n`)
+    await writeRoutine($, routinePath, DEFAULT_ROUTINE)
     return DEFAULT_ROUTINE
   }
-  return JSON.parse(await $.fs.read(routinePath)) as Routine
+  const { routine, dropped } = parseRoutine(JSON.parse(await $.fs.read(routinePath)))
+  const warning = dropped.length === 0 ? '' : droppedText(dropped)
+  if (warning !== warnedDropped) {
+    warnedDropped = warning
+    if (warning !== '') toast($, warning)
+  }
+  return routine
 }
 
-const readCount = async ($: Engine, path: string) => {
-  if (!(await $.fs.exists(path))) return 0
-  const n = parseInt(await $.fs.read(path), 10)
-  return Number.isFinite(n) ? n : 0
+// A day's log text. A multi day's half-written by another session is read once more.
+const readLog = async ($: Engine, path: string) => {
+  if (!(await $.fs.exists(path))) return undefined
+  const text = await $.fs.read(path)
+  return isDamagedLog(text) ? $.fs.read(path) : text
 }
 
-// `/fit swap` leaves the day's plan beside its count as `<date>.swap`.
-const readSwap = async ($: Engine, logDir: string, date: string): Promise<Routine[string] | undefined> => {
+const plansOf = (day: RoutineDay | undefined) => (day === undefined || day.plans.length === 0 ? [NO_PLAN] : day.plans)
+
+// `/fit swap` leaves the day's plan beside its count as `<date>.swap`, in a routine day's shape.
+const readSwap = async ($: Engine, logDir: string, date: string): Promise<RoutineDay | undefined> => {
   const path = `${logDir}/${date}.swap`
   if (!(await $.fs.exists(path))) return undefined
   // A damaged or odd file falls back to the routine instead of breaking every refresh.
   try {
-    const plan = JSON.parse(await $.fs.read(path)) as Partial<Routine[string]>
-    return typeof plan.exercise === 'string' && typeof plan.goal === 'number'
-      ? { exercise: plan.exercise, goal: plan.goal, unit: plan.unit }
-      : undefined
+    return parseRoutineDay(JSON.parse(await $.fs.read(path))).day
   } catch {
     return undefined
   }
 }
+
+const writeSwap = async ($: Engine, date: string, day: RoutineDay) =>
+  $.fs.write(`${(await files($)).log}/${date}.swap`, `${JSON.stringify(dayToFile(day))}\n`)
 
 // `/fit rest` leaves `<date>.skip`; `/fit rest off` writes "off" into it to undo.
 const readRest = async ($: Engine, path: string) =>
@@ -145,14 +173,22 @@ const progress = async ($: Engine, date: string) => {
   if (await $.fs.exists(`${logDir}/${date}.swap`)) return
   const routine = await loadRoutine($, routinePath)
   const now = await $.clock.now()
-  const plan = routine[weekdayKey(now)]
-  if (plan === undefined || !canProgress(routine, plan.exercise)) return
+  const day = routine[weekdayKey(now)]
+  // A multi day moves nothing until progressive goals move each of its exercises.
+  if (day === undefined || isMultiDay(day)) return
+  const plan = day.plans[0]
+  const singles = singleDays(routine)
+  if (plan === undefined || !canProgress(singles, plan.exercise)) return
   const before = lastDays(now, HISTORY_DAYS).slice(0, -1).reverse()
-  const days = await Promise.all(before.map(ms => readDay($, routine, logDir, ms)))
+  // Sessions on single days only: a multi day's exercise is no session of this goal yet.
+  const days = (await Promise.all(before.map(ms => readDated($, routine, logDir, ms)))).flatMap(d => (d.isMulti ? [] : d.entries))
   const to = nextGoal(plan.goal, days.filter(day => day.exercise === plan.exercise))
   if (to === undefined) return
   await freezePastDays($, routine)
-  await $.fs.write(routinePath, `${JSON.stringify(moveGoal(routine, plan.exercise, plan.goal, to), null, 2)}\n`)
+  // Single days move; multi days, and any entry the reader left out, stay as the file has them.
+  const raw = JSON.parse(await $.fs.read(routinePath)) as Record<string, unknown>
+  const moved = routineToFile(moveGoal(singles, plan.exercise, plan.goal, to))
+  await $.fs.write(routinePath, `${JSON.stringify({ ...raw, ...moved }, null, 2)}\n`)
   const unit = plan.unit ?? ''
   toast($, to > plan.goal
     ? `📈 ${plan.exercise} up to ${to}${unit}: your last session hit ${plan.goal}${unit}.`
@@ -163,15 +199,21 @@ const refreshToday = async ($: Engine): Promise<Today> => {
   const { routine, log: logDir } = await files($)
   const date = dayKey(await $.clock.now())
   await progress($, date)
-  const plan =
+  const day =
     (await readSwap($, logDir, date)) ?? (await loadRoutine($, routine))[weekdayKey(await $.clock.now())]
+  const plans = plansOf(day)
+  const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
+  // Only a multi day has a choice of exercise for a bare /fit to log to.
+  const last = day?.isMulti === true ? (await readDayState($, date)).last : undefined
+  const kind = day?.isMulti === true
+    ? { isMulti: true as const, ...(day.name === undefined ? {} : { name: day.name }) }
+    : { isMulti: false as const }
   const next: Today = {
     date,
-    exercise: plan?.exercise ?? 'reps',
-    goal: plan?.goal ?? 0,
-    unit: plan?.unit ?? '',
-    count: await readCount($, `${logDir}/${date}`),
+    exercises: plans.map((plan, i) => ({ exercise: plan.exercise, goal: plan.goal, unit: plan.unit ?? '', count: counts[i] ?? 0 })),
+    ...kind,
     isRest: await readRest($, `${logDir}/${date}.skip`),
+    ...(last === undefined ? {} : { last }),
   }
   await update($, today, () => next)
   return next
@@ -179,24 +221,31 @@ const refreshToday = async ($: Engine): Promise<Today> => {
 
 const DAY_MS = 86_400_000
 
-const readDay = async ($: Engine, routine: Routine, logDir: string, ms: number): Promise<Day> => {
+// A dated day as history entries: one on a single day, one per exercise on a multi day.
+const readDated = async ($: Engine, routine: Routine, logDir: string, ms: number) => {
   const date = dayKey(ms)
-  const plan = (await readSwap($, logDir, date)) ?? routine[weekdayKey(ms)]
-  return {
+  const day = (await readSwap($, logDir, date)) ?? routine[weekdayKey(ms)]
+  const plans = plansOf(day)
+  const counts = parseDayLog(await readLog($, `${logDir}/${date}`), plans.map(plan => plan.exercise))
+  const isSkipped = await readRest($, `${logDir}/${date}.skip`)
+  const entries: Day[] = plans.map((plan, i) => ({
     date,
-    count: await readCount($, `${logDir}/${date}`),
-    goal: plan?.goal ?? 0,
-    exercise: plan?.exercise ?? 'reps',
-    isSkipped: await readRest($, `${logDir}/${date}.skip`),
-    ...(plan?.unit === undefined ? {} : { unit: plan.unit }),
-  }
+    count: counts[i] ?? 0,
+    goal: plan.goal,
+    exercise: plan.exercise,
+    isSkipped,
+    ...(plan.unit === undefined ? {} : { unit: plan.unit }),
+  }))
+  return { isMulti: day !== undefined && isMultiDay(day), entries }
 }
+
+const readDay = async ($: Engine, routine: Routine, logDir: string, ms: number) => (await readDated($, routine, logDir, ms)).entries
 
 // Days with reps in a row just before the window, so a streak can outlast it.
 // Cached per window: a full walk once, then one day's step as the window slides.
 const olderRun = async ($: Engine, days: readonly Day[], routine: Routine, logDir: string) => {
-  const first = days[0]
-  if (first === undefined || !keepsStreak(first)) {
+  const first = days.filter(day => day.date === days[0]?.date)
+  if (first.length === 0 || !keepsDateStreak(first)) {
     await $.store.delete('streakRun')
     return 0
   }
@@ -208,11 +257,11 @@ const olderRun = async ($: Engine, days: readonly Day[], routine: Routine, logDi
     older = cache.older
   } else if (cache?.asOf === dayKey(oldest - DAY_MS) && typeof cache.older === 'number') {
     // The window moved on a day: the day that left it joins the older run.
-    older = keepsStreak(await readDay($, routine, logDir, oldest - DAY_MS)) ? cache.older + 1 : 0
+    older = keepsDateStreak(await readDay($, routine, logDir, oldest - DAY_MS)) ? cache.older + 1 : 0
   } else {
     older = 0
     for (let back = 1; back <= 366; back++) {
-      if (!keepsStreak(await readDay($, routine, logDir, oldest - back * DAY_MS))) break
+      if (!keepsDateStreak(await readDay($, routine, logDir, oldest - back * DAY_MS))) break
       older++
     }
   }
@@ -223,7 +272,7 @@ const olderRun = async ($: Engine, days: readonly Day[], routine: Routine, logDi
 const refreshHistory = async ($: Engine) => {
   const { routine: routinePath, log: logDir } = await files($)
   const routine = await loadRoutine($, routinePath)
-  const days = await Promise.all(lastDays(await $.clock.now(), HISTORY_DAYS).map(ms => readDay($, routine, logDir, ms)))
+  const days = (await Promise.all(lastDays(await $.clock.now(), HISTORY_DAYS).map(ms => readDay($, routine, logDir, ms)))).flat()
   await update($, history, () => days)
   const older = await olderRun($, days, routine, logDir)
   await update($, olderStreak, () => older)
@@ -244,15 +293,17 @@ const refreshLedger = async ($: Engine) => {
   const routine = await loadRoutine($, routinePath)
   const dates = await loggedDates($, logDir)
   const days = await Promise.all(dates.map(date => readDay($, routine, logDir, noonOf(date))))
-  await update($, ledger, () => days.filter(day => day.count > 0))
+  // A date with reps keeps every entry, so a multi day's untouched exercise still marks it short.
+  await update($, ledger, () => days.filter(entries => entries.some(day => day.count > 0)).flat())
 }
 
 type Schedule = { from: number; ms: number; base: number }
 
 // The day's pace, kept in `<date>.day` beside its count so every session reads
 // the same one: when the day started, a `/fit window`, a breather's end, and
-// the `/fit snooze`s taken (how many today, and the due point the last put off).
-type DayState = { start?: number; window?: Schedule; breather?: number; laters?: number; putOff?: number }
+// the `/fit snooze`s taken (how many today, and the due point the last put off),
+// and `last`: the exercise logged last, which a bare `/fit 20` logs to.
+type DayState = { start?: number; window?: Schedule; breather?: number; laters?: number; putOff?: number; last?: string }
 
 const dayPath = async ($: Engine, date: string) => `${(await files($)).log}/${date}.day`
 
@@ -268,6 +319,7 @@ const asDayState = (raw: unknown): DayState => {
     ...(typeof r.breather === 'number' ? { breather: r.breather } : {}),
     ...(typeof r.laters === 'number' ? { laters: r.laters } : {}),
     ...(typeof r.putOff === 'number' ? { putOff: r.putOff } : {}),
+    ...(typeof r.last === 'string' ? { last: r.last } : {}),
   }
 }
 
@@ -360,22 +412,24 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
   dueTimer = undefined
   // Re-read today: the date may have rolled over, or the shell script logged reps.
   const t = await refreshToday($)
-  const day = t === null ? {} : await readDayState($, t.date)
+  // The schedule paces one exercise: a multi day has none, so strict holds nothing on it.
+  const paced = paceable(t)
+  const day = await readDayState($, t.date)
   const s = scheduleOf(day)
   const now = await $.clock.now()
   let next: Pace | null = null
-  if (t !== null && !t.isRest && s !== undefined) {
-    const left = paceAt(Math.max(0, t.goal - s.base), t.count - s.base, setSizeFor(t.goal, paceConfig.setSize), s.from, now, s.ms)
+  if (paced !== undefined && !t.isRest && s !== undefined) {
+    const left = paceAt(Math.max(0, paced.goal - s.base), paced.count - s.base, setSizeFor(paced.goal, paceConfig.setSize), s.from, now, s.ms)
     next = {
       ...left,
       // Goal met: the schedule may still hold sets, but none are due.
-      nextDueAt: t.goal > 0 && t.count >= t.goal ? null : left.nextDueAt,
+      nextDueAt: paced.goal > 0 && paced.count >= paced.goal ? null : left.nextDueAt,
       required: left.required + s.base,
       // A breather still running: catch-up reps owed, but prompts not held.
       restUntil: day.breather !== undefined && day.breather > now ? day.breather : null,
       isPutOff: day.putOff !== undefined && day.putOff === left.required + s.base,
       // A window set mid-day (base > 0) is never the day's opener, even after a reset.
-      isOpening: s.base === 0 && t.count === 0 && left.behind > 0 && left.required <= left.setSize,
+      isOpening: s.base === 0 && paced.count === 0 && left.behind > 0 && left.required <= left.setSize,
     }
   }
   await update($, pace, () => next)
@@ -402,7 +456,7 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
     tick(now)
   }
   const wakeAt = Math.min(next?.nextDueAt ?? Infinity, next?.restUntil ?? Infinity)
-  if (wakeAt !== Infinity && t !== null && t.count < t.goal) {
+  if (wakeAt !== Infinity && paced !== undefined && paced.count < paced.goal) {
     dueTimer = $.clock.after(Math.max(1, wakeAt - now), () => void setDue($))
   }
   return next
@@ -411,10 +465,11 @@ const refreshPace = async ($: Engine): Promise<Pace | null> => {
 const setDue = async ($: Engine) => {
   const p = await refreshPace($)
   const t = await read($, today)
-  if (p === null || t === null || p.behind <= 0 || p.restUntil !== null) return
+  const paced = t === null ? undefined : paceable(t)
+  if (p === null || paced === undefined || p.behind <= 0 || p.restUntil !== null) return
   toast($, p.isOpening === true
-    ? `🏁 First set: ${p.behind} ${t.exercise} to start the day.`
-    : `⏱ Set due: ${p.behind} ${t.exercise}. ${p.required}/${t.goal} by now.`)
+    ? `🏁 First set: ${p.behind} ${paced.exercise} to start the day.`
+    : `⏱ Set due: ${p.behind} ${paced.exercise}. ${p.required}/${paced.goal} by now.`)
 }
 
 // A Close button's press: a refused close says why instead of doing nothing.
@@ -438,37 +493,84 @@ const paceText = (p: Pace | null, isStrict: boolean, now: number) => {
   return p.nextDueAt === null ? '' : `  next set in ${untilText(p.nextDueAt - now)}`
 }
 
-const line = (t: Today) => {
-  const isDone = t.goal > 0 && t.count >= t.goal
-  return `${isDone ? '✅' : '💪'} ${bar(t.count, t.goal)} ${t.count}/${t.goal}${t.unit} ${t.exercise}`
+const isFinished = (e: TodayExercise) => e.goal > 0 && e.count >= e.goal
+
+const line = (e: TodayExercise) =>
+  `${isFinished(e) ? '✅' : '💪'} ${bar(e.count, e.goal)} ${e.count}/${e.goal}${e.unit} ${e.exercise}`
+
+// What is left of an exercise, for a multi day's replies.
+const leftText = (e: TodayExercise) =>
+  e.goal <= 0 ? '' : e.count < e.goal ? ` · ${e.goal - e.count}${e.unit} to go` : ' · done'
+
+// A multi day's name, or its exercises when it has none.
+const dayName = (t: Today) => t.name ?? t.exercises.map(e => e.exercise).join(' · ')
+
+// Today in words. A single day is its line, then `pace` and `streak`; a multi
+// day is a status row (its name, `pace`, `streak`) over a line per exercise.
+const todayText = (t: Today, pace = '', streakText = '') => {
+  const [first] = t.exercises
+  if (!t.isMulti && first !== undefined) return `${line(first)}${streakText}${pace}`
+  return [`🏋 ${dayName(t)}${pace}${streakText}`, ...t.exercises.map(line)].join('\n')
 }
 
-const withStreak = (t: Today, days: readonly Day[], older = 0) => {
+const streakOf = (days: readonly Day[], older = 0) => {
   const run = fullStreak(days, older)
-  return run > 0 ? `${line(t)}  🔥${run}d` : line(t)
+  return run > 0 ? `  🔥${run}d` : ''
 }
 
-const logReps = async ($: Engine, change: (count: number) => number) => {
+const withStreak = (t: Today, days: readonly Day[], older = 0) => todayText(t, '', streakOf(days, older))
+
+// The exercise a bare `/fit 20` logs to, a nudge suggests and the spinner names.
+const focusOf = (t: Today) => t.exercises[logTarget(t.exercises, t.last)] ?? t.exercises[0] ?? { ...NO_PLAN, unit: '', count: 0 }
+
+// The one exercise the set schedule paces: a single day's. Undefined on a multi day.
+const paceable = (t: Today) => (t.isMulti ? undefined : t.exercises[0])
+
+// A set's size for an exercise: a multi day sizes each from its own goal, since
+// one setting can't fit reps and seconds alike.
+const setSizeOf = (t: Today, e: TodayExercise) => setSizeFor(e.goal, t.isMulti ? 0 : paceConfig.setSize)
+
+const NOT_ON_MULTI = (command: string) => `${command} does not work on a multi day yet.`
+
+// Writes one exercise's new count, `last`, and what follows: breathers, toasts.
+// `exercise` names the one logged; absent, a bare /fit's target (focusOf).
+const logReps = async ($: Engine, change: (count: number) => number, exercise?: string) => {
   const owed = await refreshPace($)
   const before = await refreshToday($)
-  const count = Math.max(0, change(before.count))
-  await $.fs.write(`${(await files($)).log}/${before.date}`, `${count}\n`)
+  const at = exercise === undefined ? logTarget(before.exercises, before.last) : before.exercises.findIndex(e => e.exercise === exercise)
+  const was = before.exercises[at]
+  // A press from a band drawn before the plan changed: log nothing rather than the wrong exercise.
+  if (was === undefined) {
+    toast($, `${exercise ?? 'That exercise'} isn't on today's plan any more.`)
+    return before
+  }
+  const logPath = `${(await files($)).log}/${before.date}`
+  // Another session's write still landing: writing over it would lose its counts.
+  if (isDamagedLog(await readLog($, logPath))) {
+    toast($, "Couldn't read today's log just now. Nothing logged; try again.")
+    return before
+  }
+  const count = Math.max(0, change(was.count))
+  const exercises = before.exercises.map((e, i) => (i === at ? { ...e, count } : e))
+  await $.fs.write(logPath, formatDayLog(exercises, before.isMulti))
+  // In the shared pace file, so a bare /fit in any session follows the last log.
+  await writeDayState($, before.date, state => ({ ...state, last: was.exercise }))
 
-  const after = { ...before, count }
+  const after: Today = { ...before, exercises, last: was.exercise }
   await update($, today, () => after)
   await update($, history, days =>
-    days.map(day => (day.date === after.date ? { ...day, count } : day)),
+    days.map(day => (day.date === after.date && (!after.isMulti || day.exercise === was.exercise) ? { ...day, count } : day)),
   )
   if (await isScoreboardOpen($)) await refreshLedger($)
 
   // A set that still leaves reps owed earns a breather before the rest: a short
   // one counts, and fewer reps than the band's smallest button earn a shorter
   // one. Clearing the debt or lowering the count ends one, so later sets aren't hidden.
-  const added = count - before.count
+  const added = count - was.count
   const stillOwed = owed === null ? 0 : owed.behind - added
   const s = await schedule($, after.date)
   if (owed !== null && s !== undefined && stillOwed > 0 && added > 0) {
-    const until = (await $.clock.now()) + earnedBreatherMs(added, after.goal - s.base, owed.setSize, s.ms)
+    const until = (await $.clock.now()) + earnedBreatherMs(added, was.goal - s.base, owed.setSize, s.ms)
     const isFullSet = added >= (repSteps(owed.setSize)[0] ?? owed.setSize)
     // Reps never cut short a longer breather or put-off already running. A
     // full set means it's no longer the set that was put off; a few reps under
@@ -483,18 +585,38 @@ const logReps = async ($: Engine, change: (count: number) => number) => {
     await endBreather($, after.date)
   }
   await refreshPace($)
-  if (after.goal > 0 && before.count < after.goal && count >= after.goal) {
-    // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
-    // next session of it goes. A swap counts; a goal of its own does not.
-    const routine = await loadRoutine($, (await files($)).routine)
-    const isPlanned = progressConfig.isOn && canProgress(routine, after.exercise) &&
-      Object.values(routine).some(plan => plan.exercise === after.exercise && plan.goal === after.goal)
-    const next = isPlanned ? ` Next ${after.exercise} day: ${after.goal + stepFor(after.goal)}${after.unit}.` : ''
-    toast($, `✅ Done. ${count}/${after.goal}${after.unit} ${after.exercise}. That's the work.${next}`)
+  const { goal, unit } = was
+  if (goal > 0 && was.count < goal && count >= goal) {
+    const left = exercises.filter(e => e.goal > 0 && e.count < e.goal)
+    if (after.isMulti && left.length > 0) {
+      toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.`)
+    } else {
+      // The routine's goal hit, by the rule `nextGoal` moves it on: say where the
+      // next session of it goes. A swap counts; a goal of its own does not; a multi day moves nothing yet.
+      const routine = singleDays(await loadRoutine($, (await files($)).routine))
+      const isPlanned = progressConfig.isOn && !after.isMulti && canProgress(routine, was.exercise) &&
+        allPlans(routine).some(plan => plan.exercise === was.exercise && plan.goal === goal)
+      const next = isPlanned ? ` Next ${was.exercise} day: ${goal + stepFor(goal)}${unit}.` : ''
+      toast($, `✅ Done. ${count}/${goal}${unit} ${was.exercise}. That's the work.${next}`)
+    }
   } else if (added > 0) {
-    toast($, cheer(added, count, after.goal, after.exercise, after.unit))
+    toast($, cheer(added, count, goal, was.exercise, unit))
+  } else if (added < 0 && after.isMulti) {
+    // A multi day names which count went down, since the band shows several.
+    toast($, `${was.exercise} back to ${count}${unit}.${goal > count ? ` ${goal - count}${unit} to go.` : ''}`)
   }
   return after
+}
+
+// `/fit reset`: every exercise today back to 0.
+const resetDay = async ($: Engine) => {
+  const t = await refreshToday($)
+  if (!t.isMulti) return logReps($, () => 0)
+  await $.fs.write(`${(await files($)).log}/${t.date}`, formatDayLog(t.exercises.map(e => ({ ...e, count: 0 })), true))
+  await endBreather($, t.date)
+  await refreshHistory($)
+  await refreshPace($)
+  return refreshToday($)
 }
 
 // Everything on disk another session can change, as one string: the routine's
@@ -525,30 +647,34 @@ const syncFromDisk = async ($: Engine, isForced = false) => {
   return true
 }
 
-// The reps the last nudge suggested, for the spinner.
-let nudgeReps = 0
+// The set the last nudge suggested, for the spinner.
+const nudged = { reps: 0, exercise: '' }
 
 // Easy mode: a suggestion once a turn runs long, sized to the set that's due.
-// On pace or in a breather there's nothing owed, so nothing to suggest.
+// On pace or in a breather there's nothing owed, so nothing to suggest. A multi
+// day suggests its focus exercise, or the first one still short.
 const nudge = async ($: Engine) => {
   const p = await refreshPace($)
   const t = await read($, today)
-  if (t === null || t.isRest || (t.goal > 0 && t.count >= t.goal)) return
+  if (t === null || t.isRest) return
+  const e = [focusOf(t), ...t.exercises].find(entry => !isFinished(entry))
+  if (e === undefined) return
   if (p !== null && (p.behind <= 0 || p.restUntil !== null)) return
-  nudgeReps = p === null ? setSizeFor(t.goal, paceConfig.setSize) : Math.min(p.behind, p.setSize)
-  if (nudgeReps <= 0) return
+  nudged.reps = p === null ? setSizeOf(t, e) : Math.min(p.behind, p.setSize)
+  nudged.exercise = e.exercise
+  if (nudged.reps <= 0) return
   await update($, isWaiting, () => true)
-  toast($, `Your agent's mid-set. You next: ${nudgeReps} ${t.exercise}.`)
+  toast($, `Your agent's mid-set. You next: ${nudged.reps} ${e.exercise}.`)
 }
 
 const endRest = async ($: Engine) => {
   const t = await refreshToday($)
-  if (!t.isRest) return { text: `Today isn't a rest day. ${line(t)}` }
+  if (!t.isRest) return { text: `Today isn't a rest day. ${todayText(t)}` }
   await $.fs.write(`${(await files($)).log}/${t.date}.skip`, 'off\n')
   const back = await refreshToday($)
   await refreshHistory($)
   await refreshPace($)
-  return { text: `Rest day undone. Back to work. ${line(back)}` }
+  return { text: `Rest day undone. Back to work. ${todayText(back)}` }
 }
 
 // The chart's range, kept for the next time the scoreboard opens.
@@ -607,8 +733,8 @@ const freezePastDays = async ($: Engine, old: Routine) => {
     const date = dayKey(ms)
     const path = `${logDir}/${date}.swap`
     // A logged day the old routine left out stays as it reads now, not the new plan's.
-    const plan = old[weekdayKey(ms)] ?? (logged.includes(date) ? { exercise: 'reps', goal: 0 } : undefined)
-    if (plan !== undefined && !(await $.fs.exists(path))) await $.fs.write(path, `${JSON.stringify(plan)}\n`)
+    const day = old[weekdayKey(ms)] ?? (logged.includes(date) ? single(NO_PLAN) : undefined)
+    if (day !== undefined && !(await $.fs.exists(path))) await writeSwap($, date, day)
   }
 }
 
@@ -626,14 +752,14 @@ const finishOnboarding = async ($: Engine) => {
     const old = await loadRoutine($, routinePath)
     if (JSON.stringify(old) !== JSON.stringify(routine)) await freezePastDays($, old)
     if (p.hasRoutine) await $.fs.write(`${routinePath}.bak`, await $.fs.read(routinePath))
-    await $.fs.write(routinePath, `${JSON.stringify(routine, null, 2)}\n`)
+    await writeRoutine($, routinePath, routine)
   }
   await markIntroduced($)
   await refreshToday($)
   await refreshHistory($)
   await refreshPace($)
   await $.ui.close({ id: ONBOARD_PANE })
-  const plan = routine ?? (JSON.parse(await $.fs.read(routinePath)) as Routine)
+  const plan = routine ?? (await loadRoutine($, routinePath))
   toast($, `Program set: ${describeRoutine(plan)}. Get to work.`)
 }
 
@@ -658,6 +784,8 @@ const conversationId = async ($: Engine) => {
 // Everything a conversation needs: the /fit command and today's state.
 const boot = async ($: Engine) => {
   bootedFor = await conversationId($)
+  // Each conversation hears once about entries its routine leaves out.
+  warnedDropped = ''
   const introduced = (await $.store.get('introduced')) === true
   await update($, isIntroduced, () => introduced)
   const range = await $.store.get('chartDays')
@@ -727,14 +855,16 @@ export const register: Register = (on, options) => {
         if ((await refreshToday($)).isRest) return { text: "Today's a rest day. /fit rest off to train." }
         const n = cmd.n
         const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n))
-        return { text: `${line(t)}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
+        const logged = focusOf(t)
+        return { text: `${line(logged)}${t.isMulti ? leftText(logged) : ''}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
       }
       case 'skip': {
         const t = await refreshToday($)
         if (t.isRest) return { text: 'Already a rest day. /fit rest off to train.' }
         // Reps logged means a training day: a rest day would wipe the streak.
-        if (t.count > 0) {
-          return { text: `You've logged ${t.count}${t.unit} ${t.exercise} today, so it's a training day. /fit rest is for a day off; it resets your streak.` }
+        const logged = t.exercises.filter(e => e.count > 0)
+        if (logged.length > 0) {
+          return { text: `You've logged ${logged.map(e => `${e.count}${e.unit} ${e.exercise}`).join(', ')} today, so it's a training day. /fit rest is for a day off; it resets your streak.` }
         }
         await $.fs.write(`${(await files($)).log}/${t.date}.skip`, '')
         await refreshToday($)
@@ -759,70 +889,79 @@ export const register: Register = (on, options) => {
       }
       case 'swap': {
         const before = await refreshToday($)
-        const { routine: routinePath, log: logDir } = await files($)
+        const was = paceable(before)
+        if (was === undefined) return { text: NOT_ON_MULTI('/fit swap') }
+        const { routine: routinePath } = await files($)
         const routine = await loadRoutine($, routinePath)
-        const names = [...new Set(Object.values(routine).map(p => p.exercise))]
+        const names = [...new Set(allPlans(routine).map(p => p.exercise))]
         if (names.length === 0) return { text: 'Your program has no exercises. /fit program to pick one.' }
-        const plan = pickSwap(routine, before.exercise, cmd.exercise)
+        const plan = pickSwap(routine, was.exercise, cmd.exercise)
         if (plan === undefined) {
+          const isMultiName = Object.values(routine).some(day => isMultiDay(day) && day.name?.toLowerCase() === cmd.exercise)
+          if (isMultiName) return { text: NOT_ON_MULTI(`/fit swap ${cmd.exercise ?? ''}`.trim()) }
           return { text: `No ${cmd.exercise} in your program. Pick one of: ${names.join(', ')}.` }
         }
-        if (plan.exercise === before.exercise) return { text: `Already on ${plan.exercise} today.` }
-        await $.fs.write(`${logDir}/${before.date}.swap`, `${JSON.stringify(plan)}\n`)
+        if (plan.exercise === was.exercise) return { text: `Already on ${plan.exercise} today.` }
+        await writeSwap($, before.date, single(plan))
         await refreshHistory($)
-        const amount = before.unit === '' ? `${before.count} reps` : `${before.count}${before.unit}`
-        const carried = before.count > 0 ? ` Your ${amount} carry over.` : ''
+        const amount = was.unit === '' ? `${was.count} reps` : `${was.count}${was.unit}`
+        const carried = was.count > 0 ? ` Your ${amount} carry over.` : ''
         const swapped = await refreshToday($)
         await refreshPace($)
-        return { text: `Swapped to ${plan.exercise} today.${carried} ${line(swapped)}` }
+        return { text: `Swapped to ${plan.exercise} today.${carried} ${todayText(swapped)}` }
       }
       case 'goal': {
         // Today's plan with a new goal, in the same file `/fit swap` writes.
         const before = await refreshToday($)
         if (before.isRest) return { text: "Today's a rest day. /fit rest off to train." }
-        const plan = { exercise: before.exercise, goal: cmd.n, ...(before.unit === '' ? {} : { unit: before.unit }) }
-        await $.fs.write(`${(await files($)).log}/${before.date}.swap`, `${JSON.stringify(plan)}\n`)
+        const was = paceable(before)
+        if (was === undefined) return { text: NOT_ON_MULTI('/fit goal') }
+        await writeSwap($, before.date, single({ exercise: was.exercise, goal: cmd.n, ...(was.unit === '' ? {} : { unit: was.unit }) }))
         await refreshHistory($)
         const after = await refreshToday($)
-        return { text: `Today's goal is ${cmd.n}${after.unit} ${after.exercise}. ${line(after)}${paceText(await reschedule($, before.date), isStrict, await $.clock.now())}` }
+        return { text: `Today's goal is ${cmd.n}${was.unit} ${was.exercise}. ${todayText(after)}${paceText(await reschedule($, before.date), isStrict, await $.clock.now())}` }
       }
       case 'window': {
         const t = await refreshToday($)
+        const paced = paceable(t)
+        if (paced === undefined) return { text: NOT_ON_MULTI('/fit window') }
         if (cmd.hours === null) {
           await writeDayState($, t.date, ({ window: _, ...rest }) => rest)
           return {
-            text: `Back to ${paceConfig.windowMs / HOUR_MS}h from your first prompt. ${line(t)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+            text: `Back to ${paceConfig.windowMs / HOUR_MS}h from your first prompt. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
           }
         }
         if (t.isRest) return { text: "Today's a rest day. /fit rest off to train." }
-        if (t.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
-        if (t.count >= t.goal) return { text: `Today's goal is done. ${line(t)}` }
+        if (paced.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
+        if (paced.count >= paced.goal) return { text: `Today's goal is done. ${line(paced)}` }
         const now = await $.clock.now()
         // Today ends at midnight: a window can't run into tomorrow's log. It ends a
         // minute early so its last set comes due today, not on the stroke of midnight.
         const d = new Date(now)
         const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
         const ms = Math.max(1, Math.min(cmd.hours * HOUR_MS, midnight - now - 60_000))
-        await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms, base: t.count } }))
+        await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms, base: paced.count } }))
         const span = ms < cmd.hours * HOUR_MS ? 'between now and midnight' : `over the next ${cmd.hours}h (done by ${clockTime(now + ms)})`
         return {
-          text: `${t.goal - t.count}${t.unit} ${t.exercise} left, spread ${span}. ${line(t)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+          text: `${paced.goal - paced.count}${paced.unit} ${paced.exercise} left, spread ${span}. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
         }
       }
       case 'window-until': {
         const t = await refreshToday($)
+        const paced = paceable(t)
+        if (paced === undefined) return { text: NOT_ON_MULTI('/fit window') }
         if (t.isRest) return { text: "Today's a rest day. /fit rest off to train." }
-        if (t.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
-        if (t.count >= t.goal) return { text: `Today's goal is done. ${line(t)}` }
+        if (paced.goal <= 0) return { text: 'No goal today. /fit goal 60 to set one.' }
+        if (paced.count >= paced.goal) return { text: `Today's goal is done. ${line(paced)}` }
         const now = await $.clock.now()
         const d = new Date(now)
         const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), cmd.hour, cmd.minute).getTime()
         const named = `${String(cmd.hour).padStart(2, '0')}:${String(cmd.minute).padStart(2, '0')}`
         if (end <= now) return { text: `${named} has already passed today. 3–4 digits are a clock time (1240 = 12:40); for hours from now, use 1–2 digits like /fit window 2.` }
         // The same window `/fit window <hours>` sets, ending at the time named.
-        await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms: end - now, base: t.count } }))
+        await writeDayState($, t.date, s => ({ ...s, window: { from: now, ms: end - now, base: paced.count } }))
         return {
-          text: `${t.goal - t.count}${t.unit} ${t.exercise} left, spread between now and ${named}. ${line(t)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
+          text: `${paced.goal - paced.count}${paced.unit} ${paced.exercise} left, spread between now and ${named}. ${line(paced)}${paceText(await reschedule($, t.date), isStrict, await $.clock.now())}`,
         }
       }
       case 'snooze': {
@@ -831,7 +970,9 @@ export const register: Register = (on, options) => {
         const p = await refreshPace($)
         const t = await read($, today)
         if (t === null || t.isRest) return { text: "Today's a rest day. Nothing to put off." }
-        if (t.goal > 0 && t.count >= t.goal) return { text: `Today's goal is done. ${line(t)}` }
+        const paced = paceable(t)
+        if (paced === undefined) return { text: NOT_ON_MULTI('/fit snooze') }
+        if (isFinished(paced)) return { text: `Today's goal is done. ${line(paced)}` }
         if (p === null) return { text: 'Nothing is due yet. The day starts with your first prompt.' }
         if (p.behind <= 0) {
           return { text: p.nextDueAt === null ? 'Nothing is due.' : `Nothing is due until ${clockTime(p.nextDueAt)}. Put it off then.` }
@@ -849,7 +990,7 @@ export const register: Register = (on, options) => {
         const until = (await $.clock.now()) + cmd.minutes * 60_000
         await writeDayState($, t.date, s => ({ ...s, breather: until, laters: (s.laters ?? 0) + 1, putOff: p.required }))
         return {
-          text: `${p.behind} ${t.exercise} put off until ${clockTime(until)}. ${line(t)}${paceText(await refreshPace($), isStrict, await $.clock.now())}`,
+          text: `${p.behind} ${paced.exercise} put off until ${clockTime(until)}. ${line(paced)}${paceText(await refreshPace($), isStrict, await $.clock.now())}`,
         }
       }
       case 'program':
@@ -860,7 +1001,7 @@ export const register: Register = (on, options) => {
         await update($, isIntroduced, () => false)
         return { text: 'Welcome is back above your prompt.' }
       case 'reset':
-        return { text: `Reset. ${line(await logReps($, () => 0))}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
+        return { text: `Reset. ${todayText(await resetDay($), paceText(await read($, pace), isStrict, await $.clock.now()))}` }
       case 'help':
         await markIntroduced($)
         await $.ui.open({ id: HELP_PANE, title: 'HELP' })
@@ -889,16 +1030,16 @@ export const register: Register = (on, options) => {
         return { text: 'Terminal Gym panels closed.' }
       case 'status': {
         const t = await refreshToday($)
-        const shown = withStreak(t, await refreshHistory($), await read($, olderStreak))
-        return { text: `${shown}${paceText(await refreshPace($), isStrict, await $.clock.now())}` }
+        const run = streakOf(await refreshHistory($), await read($, olderStreak))
+        return { text: todayText(t, paceText(await refreshPace($), isStrict, await $.clock.now()), run) }
       }
       case 'reload': {
         // Every session reads the same files, so a reload is a fresh read of them.
         if (!(await syncFromDisk($, true))) return { text: "Couldn't read ~/.claude/fitness just now. Nothing changed; try again." }
         const t = await read($, today)
         if (t === null) return { text: 'Reloaded from disk.' }
-        const shown = withStreak(t, await read($, history), await read($, olderStreak))
-        return { text: `Reloaded from disk. ${shown}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
+        const run = streakOf(await read($, history), await read($, olderStreak))
+        return { text: `Reloaded from disk. ${todayText(t, paceText(await read($, pace), isStrict, await $.clock.now()), run)}` }
       }
     }
   })
@@ -912,16 +1053,17 @@ export const register: Register = (on, options) => {
     await startDay($)
     const p = await refreshPace($)
     const t = await read($, today)
+    const paced = t === null ? undefined : paceable(t)
     // Claude Code puts a dropped prompt back in the box itself; a fill here
-    // as well left it there twice.
+    // as well left it there twice. No pace on a multi day, so nothing is held there.
     if (isStrict && p !== null && p.behind > 0 && p.restUntil === null) {
       if (p.isOpening === true) {
         return {
-          drop: `Start the day with a set: ${p.behind} ${t?.exercise ?? 'reps'}. /fit ${p.behind} to log it, then send your prompt. /fit rest skips the day (breaks streak).`,
+          drop: `Start the day with a set: ${p.behind} ${paced?.exercise ?? 'reps'}. /fit ${p.behind} to log it, then send your prompt. /fit rest skips the day (breaks streak).`,
         }
       }
       return {
-        drop: `${p.behind} ${t?.exercise ?? 'reps'} due now (${p.required}/${t?.goal ?? 0} by now). /fit ${p.behind} to log it, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.`,
+        drop: `${p.behind} ${paced?.exercise ?? 'reps'} due now (${p.required}/${paced?.goal ?? 0} by now). /fit ${p.behind} to log it, then send your prompt. /fit snooze 30 puts it off; /fit easy stops holding prompts.`,
       }
     }
     return next(e)
@@ -948,7 +1090,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const t = await read($, today)
     if (options.spinner === false || t === null || !(await read($, isWaiting))) return next(e)
-    return next({ ...e, props: { ...e.props, message: `${nudgeReps} ${t.exercise} while Claude works` } })
+    return next({ ...e, props: { ...e.props, message: `${nudged.reps} ${nudged.exercise} while Claude works` } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1006,7 +1148,7 @@ export const register: Register = (on, options) => {
 
     // A rest day is deliberate, not a miss: no rep buttons, just a way back.
     if (t.isRest) {
-      const REST = `😴 Rest day · ${t.exercise} back tomorrow`
+      const REST = `😴 Rest day · ${t.isMulti ? dayName(t) : focusOf(t).exercise} back tomorrow`
       const TRAIN = 'Train today'
       return (
         <Box key="rest" flexDirection={cols >= cells(REST) + 2 + buttonsWidth([TRAIN]) ? 'row' : 'column'}>
@@ -1020,14 +1162,46 @@ export const register: Register = (on, options) => {
     }
 
     const days = await read($, history)
-    const color = progressColor(t.count, t.goal)
+    const streakText = streakOf(days, await read($, olderStreak))
+    const paced = paceable(t)
+
+    // A multi day: a status row, then a row per exercise with its own bar and
+    // buttons sized from its own goal. Five exercises at most: six rows.
+    if (paced === undefined) {
+      const rows = t.exercises.map(entry => {
+        const steps = isFinished(entry) ? [] : repSteps(setSizeOf(t, entry))
+        const color = progressColor(entry.count, entry.goal)
+        return (
+          <Box key={`row-${entry.exercise}`}>
+            <Text color={color} dimColor={color === undefined} wrap="truncate-end">
+              {line(entry)}
+              {steps.length > 0 ? '  ' : ''}
+            </Text>
+            {steps.map((n, i) => (
+              <Box key={`${entry.exercise}-step${i}`}>
+                {i > 0 && <Text> </Text>}
+                <Button key={`${entry.exercise}+${n}`} label={`+${n}${entry.unit}`} onPress={() => logReps($, count => count + n, entry.exercise)} />
+              </Box>
+            ))}
+          </Box>
+        )
+      })
+      return (
+        <Box key="multi" flexDirection="column">
+          <Text bold wrap="truncate-end">
+            {`🏋 ${dayName(t)}${paceText(await read($, pace), isStrict, await $.clock.now())}${streakText}`}
+          </Text>
+          {rows}
+        </Box>
+      )
+    }
+
+    const color = progressColor(paced.count, paced.goal)
     const add = (n: number) => () => void logReps($, count => count + n)
-    const progress = `${line(t)}${paceText(await read($, pace), isStrict, await $.clock.now())}`
-    const run = fullStreak(days, await read($, olderStreak))
-    const streakText = run > 0 ? `  🔥${run}d` : ''
+    const progress = `${line(paced)}${paceText(await read($, pace), isStrict, await $.clock.now())}`
     const LOG_LABEL = 'log reps: '
     // Buttons sized to today's set: a 300 goal's 30-rep sets get +10 +20 +30.
-    const steps = repSteps(setSizeFor(t.goal, paceConfig.setSize))
+    const steps = repSteps(setSizeFor(paced.goal, paceConfig.setSize))
     const logWidth = cells(LOG_LABEL) + buttonsWidth(steps.map(n => `+${n}`)) + cells(streakText)
 
     return (
@@ -1203,9 +1377,9 @@ export const register: Register = (on, options) => {
     }
 
     const routine = pickedRoutine(p)
-    const exercise = routine?.mon?.exercise ?? (await read($, today))?.exercise ?? 'pushups'
+    const exercise = routine?.mon?.plans[0]?.exercise ?? (await read($, today))?.exercises[0]?.exercise ?? 'pushups'
     const sample = withStreak(
-      { date: '', exercise, goal: 100, unit: '', count: 60, isRest: false },
+      { date: '', exercises: [{ exercise, goal: 100, unit: '', count: 60 }], isMulti: false, isRest: false },
       // three finished days and reps today: 🔥4d
       [
         ...Array.from({ length: 3 }, (_, i) => ({ date: `d${i}`, count: 100, goal: 100, exercise, isSkipped: false })),

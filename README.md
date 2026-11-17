@@ -25,6 +25,7 @@ https://github.com/user-attachments/assets/14373c7e-ad8a-4f92-812b-c93c3201b1b3
 - **Strict mode**: today's goal is split into sets spread over your day. Fall behind and your prompts wait until you catch up.
 - **Scoreboard** (`/fit streak`): an ASCII barbell (in the terminal), your streak and best streak, all-time reps per exercise with the next milestone, one chart of every exercise in its own color, the past year as a grid, and the last week by exercise.
 - **Progressive goals** (opt-in): hit a goal, and the next session of that exercise asks for about 5% more.
+- **Multi-exercise days**: a weekday can hold up to 5 exercises, each with its own goal, its own row on the band and its own **+** buttons.
 - **Streaks**: count every day you log any reps, for as long as you keep it going. A day with none, or a rest day, resets it. The chart and grid still mark the days you hit the full goal.
 
 ## How a strict day works
@@ -67,6 +68,29 @@ With the default rotation, 100 pushups on Monday moves Thursday and Sunday to 10
 
 The new goal is written to `routine.json`. Before that, the days before today are frozen at the goals they had, so the grid still shows them as hit. `/fit progress off` stops the changes and keeps the goals where they are.
 
+## Multi-exercise days
+
+A weekday in `routine.json` can hold a whole session: an optional name and up to 5 exercises, each with its own goal and unit.
+
+```json
+"tue": {
+  "name": "Arms day",
+  "exercises": [
+    { "exercise": "dips", "goal": 100 },
+    { "exercise": "pushups", "goal": 50 },
+    { "exercise": "plank", "goal": 180, "unit": "s" }
+  ]
+}
+```
+
+On that day the band shows a status row (the day's name, its pace and your streak) and one row per exercise, each with its own progress bar and **+** buttons sized from that exercise's goal: the plank's buttons step in seconds, the dips' in reps. A finished exercise shows ✅ and no buttons. A **+** logs to its row. `/fit 20` logs to the exercise you logged last today, in any session, or to the first one when you haven't logged yet. Every reply and toast names the exercise and what is left of it, and logging past an exercise's goal still counts.
+
+The day counts once for your streak when any exercise has reps, and as hit on the grid and the year only when every exercise hit its goal. All-time totals and best days count each exercise on its own.
+
+An entry with no name, a goal of 0 or less, a name already listed (in any case), or past the fifth is left out, and one toast names every entry left out. A day whose list ends up empty has no plan.
+
+Not on a multi day yet: strict mode holds no prompt and runs no set schedule, progressive goals leave it alone, and `/fit swap`, `/fit goal`, `/fit window` and `/fit snooze` say they don't work there. `/fit reset` puts every exercise back to 0.
+
 ## The scoreboard
 
 `/fit streak` opens the scoreboard. `/fit streak 90` opens it on the last 90 days, from 2 to 365. The **7d**, **30d**, **90d** and **1y** buttons change the range, and the scoreboard keeps your choice for next time.
@@ -75,9 +99,9 @@ The new goal is written to `routine.json`. Before that, the days before today ar
 - **The chart** shows every exercise on one timeline, with a bar a day while the days fit across the pane. A longer range shows a bar per week or more, stacked by exercise. Bar height is reps.
 - **The year grid** shows the past year, one column a week. It draws in the terminal only.
 
-Each exercise keeps one color. Your first three logged exercises get gold, blue and pink. Later exercises share grey, because a fourth color can't stay distinct under color blindness, and their labels tell them apart. A bright bar or square means you hit the goal. A dim one means you fell short.
+Each exercise keeps one color. Your first three logged exercises get gold, blue and pink. Later exercises share grey, because a fourth color can't stay distinct under color blindness, and their labels tell them apart. A bright bar or square means you hit the goal. A dim one means you fell short. On a multi day each exercise's part of the bar is bright or dim on its own, and its square on the year grid is bright only when every exercise hit.
 
-A day's log is one count for one exercise. If you `/fit swap` during a day, that day's reps all count for the exercise it ended on. Timed exercises count in the chart's bars alongside reps, and the headline total counts reps only.
+A single day's log is one count for one exercise, and a multi day's is a count per exercise, stacked in one bar. If you `/fit swap` during a day, that day's reps all count for the exercise it ended on. Timed exercises count in the chart's bars alongside reps, and the headline total counts reps only.
 
 ## Several sessions at once
 
@@ -128,11 +152,11 @@ In `/config`, under terminal-gym:
 
 The mod makes no network calls and adds no hidden context for the model. `/fit` replies appear in your conversation like any slash command's output, so Claude can see them. Everything else stays on your machine: a few values in the mod's own store (see below), and your data in `~/.claude/fitness`:
 
-- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises. Edit it for a custom program. With progressive goals on, the mod changes the goals in it.
-- `log/YYYY-MM-DD`: that day's count.
+- `routine.json`: the plan per weekday, for example `{ "mon": { "exercise": "pushups", "goal": 100 } }`, with an optional `"unit": "s"` for timed exercises, or a multi day, `{ "name": "Arms day", "exercises": [ … ] }` (see [Multi-exercise days](#multi-exercise-days)). Edit it for a custom program. With progressive goals on, the mod changes the goals in it, writing a single day back as one plan and a multi day as its name and list.
+- `log/YYYY-MM-DD`: that day's count; on a multi day, a count per exercise, for example `{"dips":40,"pushups":20,"plank":0}`.
 - `log/YYYY-MM-DD.skip`: a rest day. If it contains `off`, the rest day was undone.
 - `log/YYYY-MM-DD.swap`: that day's plan after `/fit swap` or `/fit goal`, in the same shape as a routine day.
-- `log/YYYY-MM-DD.day`: that day's pace, for example `{ "start": 1760000000000, "window": { "from": …, "ms": …, "base": 0 }, "breather": …, "laters": 1, "putOff": 20 }`: when the day started (your first prompt), a `/fit window`, when a breather ends (milliseconds since the epoch), and the `/fit snooze`s taken: how many today, and the due point the last one put off.
+- `log/YYYY-MM-DD.day`: that day's pace, for example `{ "start": 1760000000000, "window": { "from": …, "ms": …, "base": 0 }, "breather": …, "laters": 1, "putOff": 20, "last": "dips" }`: when the day started (your first prompt), a `/fit window`, when a breather ends (milliseconds since the epoch), the `/fit snooze`s taken: how many today, and the due point the last one put off, and the exercise logged last, which a bare `/fit 20` logs to on a multi day.
 
 ## What it does inside Claude Code
 
