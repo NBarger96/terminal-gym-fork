@@ -85,7 +85,7 @@ A weekday in `routine.json` can hold a whole session: an optional name and up to
 }
 ```
 
-On that day the band shows a status row (the day's name, its pace and your streak) and one row per exercise, each with its own progress bar and **+** buttons sized from that exercise's goal: the plank's buttons step in seconds, the dips' in reps. A finished exercise shows ✅ and no buttons. A **+** logs to its row. `/fit 20` logs to the exercise you logged last today, in any session, or to the first one when you haven't logged yet. Every reply and toast names the exercise and what is left of it, and logging past an exercise's goal still counts.
+On that day the band shows a status row (the day's name, its pace and your streak) and one row per exercise, each with its own progress bar and **+** buttons sized from that exercise's goal: the plank's buttons step in seconds, the dips' in reps. A finished exercise shows ✅ and no buttons. A **+** logs to its row. `/fit 20` logs to the exercise you logged last today, in any session, or to the first one when you haven't logged yet. `/fit 20 dips` logs to dips: the name matches in any case, and the start of a name works when only one exercise starts that way (`/fit 20 di`). A start that fits several exercises logs nothing and the reply names the ones it fits; a name not on today's plan logs nothing and the reply lists today's exercises. `/fit set 80 dips` fixes one exercise's count, and `/fit set 80` fixes the one you logged last. When an exercise finishes, a toast lists what is left today; when the whole day finishes, a toast lists every exercise's count. Every reply and toast names the exercise and what is left of it, and logging past an exercise's goal still counts.
 
 The day counts once for your streak when any exercise has reps, and as hit on the grid and the year only when every exercise hit its goal. All-time totals and best days count each exercise on its own.
 
@@ -115,7 +115,8 @@ Every Claude Code session reads the same log in `~/.claude/fitness`, so a set yo
 |---|---|
 | `/fit` | today's progress, pace and streak |
 | `/fit 20` | log 20 reps |
-| `/fit set 80` | fix today's count |
+| `/fit 20 dips` | log 20 to the exercise named (any case, or the start of its name); a name not on today's plan logs nothing |
+| `/fit set 80 [exercise]` | fix today's count (on a multi day, the exercise named, or the one logged last) |
 | `/fit reset` | today back to 0 |
 | `/fit goal 60` | change today's goal (your routine stays as it is) |
 | `/fit window 3` | spread what's left of today over the next 3 hours (`/fit window off` to undo) |

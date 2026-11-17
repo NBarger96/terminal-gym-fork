@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { amount, axisText, barCells, barSvg, bestStreak, bucketDays, bucketLabel, changeText, chartBars, chartWidth, commas, exerciseColors, exerciseTotals, faded, nextMilestone, rangeSummary, yearCells } from '../hooks/stats'
-import { buttonsWidth, canProgress, cells, cheer, customRoutine, describeRoutine, exerciseGoals, formatDayLog, heatCells, moveGoal, nextGoal, paceAt, parseCustom, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, repSteps, routineToFile, scale, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
+import { buttonsWidth, canProgress, cells, cheer, customRoutine, describeRoutine, exerciseGoals, formatDayLog, heatCells, matchExercise, moveGoal, nextGoal, paceAt, parseCustom, parseDayLog, parseFit, parseRoutine, pickSwap, progressColor, repSteps, routineToFile, scale, setSizeFor, stepFor, streak, untilText } from '../hooks/lib'
 
 // A routine as routine.json would hold it, read into the shape the helpers take.
 const asRoutine = (raw: object) => parseRoutine(raw).routine
@@ -2139,7 +2139,7 @@ describe('multi days', () => {
     expect(toasts.some(t => t.startsWith('💪 +20s plank.') && t.endsWith('160s to go.'))).toBe(true)
     await ui.unmount()
     await fit($, 'set 180')
-    expect(toasts.some(t => t.startsWith('✅ Done. 180/180s plank.'))).toBe(true)
+    expect(toasts.some(t => t.startsWith('✅ Arms day done: 100/100 dips, 50/50 pushups, 180/180s plank.'))).toBe(true)
   })
 
   test('the band: a status row, then a row per exercise with buttons from its own goal', async ($, on) => {
@@ -2322,7 +2322,8 @@ describe('multi days', () => {
     await ui.press({ key: 'plank+20' })
     await ui.unmount()
     await fit($, 'set 180')
-    expect(toasts.some(t => t.startsWith('✅ Done. 180/180s plank.') && t.endsWith('Next plank day: 190s.'))).toBe(true)
+    // The day's last exercise finishes the day: its toast lists every count, then the promise.
+    expect(toasts).toContain("✅ Arms day done: 100/100 dips, 50/50 pushups, 180/180s plank. That's the work. Next plank day: 190s.")
   })
 
   test('a swap file holds a multi day too', async ($, on) => {
@@ -2577,5 +2578,105 @@ describe('multi days', () => {
     const wide = await textBox(100)
     expect(wide?.type).toBe('Box')
     expect(wide?.props?.width).toBeUndefined()
+  })
+
+  test('a typed name matches an exercise in any case, or by the only name it starts', () => {
+    const names = ['dips', 'pushups', 'plank', 'jumping jacks']
+    expect(matchExercise('dips', names)).toEqual({ kind: 'one', index: 0 })
+    expect(matchExercise('DIPS', names)).toEqual({ kind: 'one', index: 0 })
+    expect(matchExercise('di', names)).toEqual({ kind: 'one', index: 0 })
+    expect(matchExercise('push', names)).toEqual({ kind: 'one', index: 1 })
+    expect(matchExercise('Jumping  Jacks', names)).toEqual({ kind: 'one', index: 3 })
+    expect(matchExercise('p', names)).toEqual({ kind: 'many', names: ['pushups', 'plank'] })
+    expect(matchExercise('lunges', names)).toEqual({ kind: 'none' })
+    expect(matchExercise('  ', names)).toEqual({ kind: 'none' })
+    // A whole name wins over a longer one it starts.
+    expect(matchExercise('dip', ['dips', 'dip'])).toEqual({ kind: 'one', index: 1 })
+  })
+
+  test('/fit <n> and /fit set <n> take an exercise name after the number', () => {
+    expect(parseFit('20 dips')).toEqual({ kind: 'add', n: 20, typedName: 'dips' })
+    expect(parseFit('-5 Dips')).toEqual({ kind: 'add', n: -5, typedName: 'dips' })
+    expect(parseFit(' 20  jumping   jacks ')).toEqual({ kind: 'add', n: 20, typedName: 'jumping jacks' })
+    expect(parseFit('set 80 dips')).toEqual({ kind: 'set', n: 80, typedName: 'dips' })
+    expect(parseFit('set 80')).toEqual({ kind: 'set', n: 80 })
+    expect(parseFit('20')).toEqual({ kind: 'add', n: 20 })
+    expect(parseFit('set dips').kind).toBe('error')
+  })
+
+  test('/fit <n> <name> logs to the exercise named, in any case or by its start, and sets last', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday())
+    await start($)
+    await fit($, '5 pushups')
+    expect(dayState(files).last).toBe('pushups')
+    expect((await fit($, '20 dips')).text).toContain('20/100 dips')
+    expect((await fit($, '20 DIPS')).text).toContain('40/100 dips')
+    expect((await fit($, '20 di')).text).toContain('60/100 dips')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":60,"pushups":5,"plank":0}\n')
+    expect(dayState(files).last).toBe('dips')
+    // A bare /fit follows the named log.
+    expect((await fit($, '10')).text).toContain('70/100 dips')
+  })
+
+  test('an ambiguous or unknown name logs nothing and says which exercises it could be', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":10,"pushups":0,"plank":0}\n']]))
+    await start($)
+    const many = (await fit($, '20 p')).text
+    expect(many).toContain('pushups or plank')
+    expect(many).toContain('nothing logged')
+    const none = (await fit($, '20 lunges')).text
+    expect(none).toContain('No lunges today')
+    expect(none).toContain('dips, pushups, plank')
+    expect((await fit($, 'set 5 lunges')).text).toContain('No lunges today')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":10,"pushups":0,"plank":0}\n')
+    expect(dayState(files).last).toBeUndefined()
+  })
+
+  test('/fit set fixes the named exercise, or the last one logged; /fit reset zeroes the day', async ($, on) => {
+    const { files } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":10,"pushups":20,"plank":30}\n']]))
+    await start($)
+    expect((await fit($, 'set 80 dips')).text).toContain('80/100 dips')
+    await fit($, '5 plank')
+    expect((await fit($, 'set 90')).text).toContain('90/180s plank')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":80,"pushups":20,"plank":90}\n')
+    await fit($, 'reset')
+    expect(files.get(TODAY_LOG)).toBe('{"dips":0,"pushups":0,"plank":0}\n')
+  })
+
+  test('a bare /fit shows every exercise and the streak', async ($, on) => {
+    multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":40,"pushups":50,"plank":0}\n'], [`${LOG}/2026-10-04`, '10\n']]))
+    await start($)
+    const text = (await fit($, '')).text
+    expect(text).toMatch(/^🏋 Arms day {2}🔥2d/)
+    for (const row of ['40/100 dips', '✅ ▓▓▓▓▓▓▓▓▓▓ 50/50 pushups', '0/180s plank']) expect(text).toContain(row)
+  })
+
+  test('the day\'s last exercise to finish toasts every count, from a press too', async ($, on) => {
+    const { toasts } = multiWorld(on, armsMonday([[TODAY_LOG, '{"dips":100,"pushups":40,"plank":160}\n']]))
+    await start($)
+    await fit($, '15 push')
+    expect(toasts).toContain('✅ pushups done: 55/50. Still to go: 20s plank.')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...BAND })
+    await ui.press({ key: 'plank+20' })
+    await ui.unmount()
+    expect(toasts).toContain("✅ Arms day done: 100/100 dips, 55/50 pushups, 180/180s plank. That's the work.")
+  })
+
+  test('a single day takes its own exercise\'s name and refuses another', async ($, on) => {
+    const { files } = multiWorld(on, new Map())
+    await start($)
+    expect((await fit($, '20')).text).toContain('20/100 pushups')
+    expect((await fit($, '10 Push')).text).toContain('30/100 pushups')
+    expect((await fit($, '10 dips')).text).toContain('No dips today')
+    expect(files.get(TODAY_LOG)).toBe('30\n')
+  })
+
+  test('/fit help describes the named /fit forms', async ($, on) => {
+    multiWorld(on, new Map())
+    await start($)
+    await fit($, 'help')
+    const ui = await $.ui.mount({ plugin: 'terminal-gym', surface: 'terminal', ...PANE, requestId: 'gym-help' })
+    expect(await ui.find({ type: 'Markdown', text: /`\/fit 20 dips` logs to dips[\s\S]*`\/fit set 80 dips` fixes one exercise/ })).toBeDefined()
+    await ui.unmount()
   })
 })

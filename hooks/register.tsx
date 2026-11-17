@@ -37,6 +37,7 @@ import {
   heatCells,
   lastDays,
   logTarget,
+  matchExercise,
   moveGoal,
   nextGoal,
   noonOf,
@@ -504,8 +505,9 @@ const paceText = (p: Pace | null, isStrict: boolean, now: number) => {
 
 const isFinished = (e: TodayExercise) => e.goal > 0 && e.count >= e.goal
 
-const line = (e: TodayExercise) =>
-  `${isFinished(e) ? '✅' : '💪'} ${bar(e.count, e.goal)} ${e.count}/${e.goal}${e.unit} ${e.exercise}`
+const countText = (e: TodayExercise) => `${e.count}/${e.goal}${e.unit} ${e.exercise}`
+
+const line = (e: TodayExercise) => `${isFinished(e) ? '✅' : '💪'} ${bar(e.count, e.goal)} ${countText(e)}`
 
 // What is left of an exercise, for a multi day's replies.
 const leftText = (e: TodayExercise) =>
@@ -604,6 +606,8 @@ const logReps = async ($: Engine, change: (count: number) => number, exercise?: 
     const left = exercises.filter(e => e.goal > 0 && e.count < e.goal)
     if (after.isMulti && left.length > 0) {
       toast($, `✅ ${was.exercise} done: ${count}/${goal}${unit}. Still to go: ${left.map(e => `${e.goal - e.count}${e.unit} ${e.exercise}`).join(', ')}.${next}`)
+    } else if (after.isMulti) {
+      toast($, `✅ ${after.name === undefined ? 'All done today' : `${after.name} done`}: ${exercises.map(countText).join(', ')}. That's the work.${next}`)
     } else {
       toast($, `✅ Done. ${count}/${goal}${unit} ${was.exercise}. That's the work.${next}`)
     }
@@ -818,7 +822,7 @@ const boot = async ($: Engine) => {
   await $.command.register({
     name: 'fit',
     description: "Log reps toward today's goal",
-    argumentHint: '[n | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
+    argumentHint: '[n [exercise] | set n [exercise] | snooze [min] | goal n | window hours | swap | streak | strict | easy | help]',
     immediate: true,
   })
 }
@@ -862,10 +866,21 @@ export const register: Register = (on, options) => {
         return { text: cmd.text }
       case 'add':
       case 'set': {
-        if ((await refreshToday($)).isRest) return { text: "Today's a rest day. /fit rest off to train." }
+        const before = await refreshToday($)
+        if (before.isRest) return { text: "Today's a rest day. /fit rest off to train." }
+        let exercise: string | undefined
+        if (cmd.typedName !== undefined) {
+          const names = before.exercises.map(e => e.exercise)
+          const match = matchExercise(cmd.typedName, names)
+          if (match.kind === 'many') return { text: `"${cmd.typedName}" could be ${match.names.join(' or ')}, so nothing logged. Type more of the name.` }
+          if (match.kind === 'none') return { text: `No ${cmd.typedName} today, so nothing logged. Today: ${names.join(', ')}.` }
+          exercise = names[match.index]
+        }
         const n = cmd.n
-        const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n))
-        const logged = focusOf(t)
+        const t = await logReps($, count => (cmd.kind === 'add' ? count + n : n), exercise)
+        const logged = exercise === undefined ? focusOf(t) : t.exercises.find(e => e.exercise === exercise)
+        // The plan changed under the command: logReps logged nothing and toasted why.
+        if (logged === undefined) return { text: `${exercise} isn't on today's plan any more, so nothing logged.` }
         return { text: `${line(logged)}${t.isMulti ? leftText(logged) : ''}${paceText(await read($, pace), isStrict, await $.clock.now())}` }
       }
       case 'skip': {
